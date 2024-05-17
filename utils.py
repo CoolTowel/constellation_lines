@@ -59,8 +59,14 @@ class FishEyeImage():
 
         self.dpi = dpi
 
-    def lens_func(self, theta):
-        r = self.f*np.sin(self.k*theta)/self.k
+    def lens_func(self, theta):  #see https://ptgui.com/support.html#3_28 
+        if self.k>=-1 and self.k<0:
+            r = self.f*np.sin(self.k*theta)/self.k
+        elif self.k==0:
+            r = self.f*theta
+        elif self.k>0 and self.k<=1:
+            r = self.f*np.tan(self.k*theta)/self.k
+            
         return r
 
     def solve(self, solve_size=400):
