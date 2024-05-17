@@ -38,7 +38,7 @@ def x_y(ra1, dec1, ra2, dec2, lens_func=tt11):
     r = lens_func(ang_sep)/0.006
     x = r * np.cos(pa)
     y = r * np.sin(pa)
-    return x, y
+    return x, y, ang_sep
 
 
 class FishEyeImage():
@@ -85,7 +85,7 @@ class FishEyeImage():
         self.roll = self.solution['Roll']/180*np.pi
         return self.solution
 
-    def lens_proj(self, xy, image_to_show):
+    def rot_shift(self, xy, image_to_show):
         xy = rot(rot(xy, np.pi/2), self.roll)
         xy = np.dot([[1, 0], [0, -1]], xy)
         xy[0] += (image_to_show.shape[1]/2)-0.5
@@ -97,27 +97,31 @@ class FishEyeImage():
 
     def constellation(self, fn='test.jpg', cons_file_path='conslines.npy'):
         cons_lines = np.load(cons_file_path)
+        cons_lines_xy = np.array([[0,0],[0,0]])
+        draw = ImageDraw.Draw(self.img)
+
         for i in range(cons_lines.shape[0]):
             star_1 = cons_lines[i][0]
             star_2 = cons_lines[i][1]
-            x1, y1 = x_y(
+            x1, y1, angular_separation1 = x_y(
                 self.ra, self.dec, star_1[0]/180*np.pi, star_1[1]/180*np.pi, self.lens_func)
-            x2, y2 = x_y(
+            x2, y2, angular_separation2 = x_y(
                 self.ra, self.dec, star_2[0]/180*np.pi, star_2[1]/180*np.pi, self.lens_func)
-            if x2 < x1:
-                x1, x2 = x2, x1
-                y1, y2 = y2, y1
-            k = (y2-y1)/(x2-x1)
-            disp_val = 20
-            x1 += disp_val*np.cos(np.arctan(k))
-            y1 += disp_val*np.sin(np.arctan(k))
-            x2 -= disp_val*np.cos(np.arctan(k))
-            y2 -= disp_val*np.sin(np.arctan(k))
-            cons_lines[i][0] = self.lens_proj([x1, y1], self.raw)
-            cons_lines[i][1] = self.lens_proj([x2, y2], self.raw)
-        draw = ImageDraw.Draw(self.img)
-        for i in range(cons_lines.shape[0]):
-            draw.line(cons_lines[i].flatten()-16, fill='white', width=7)
+            if angular_separation1<0.45*np.pi or angular_separation1<0.45*np.pi:
+                if x2 < x1:
+                    x1, x2 = x2, x1
+                    y1, y2 = y2, y1
+                k = (y2-y1)/(x2-x1)
+                break_for_star = 20 # 星座连线断开，露出恒星
+                x1 += break_for_star*np.cos(np.arctan(k))
+                y1 += break_for_star*np.sin(np.arctan(k))
+                x2 -= break_for_star*np.cos(np.arctan(k))
+                y2 -= break_for_star*np.sin(np.arctan(k))
+                x1,y1 = self.rot_shift([x1, y1], self.raw)-16
+                x2,y2 = self.rot_shift([x2, y2], self.raw)-16
+                # cons_lines_xy = np.append(cons_lines_xy,[line_vertex1,line_vertex2])
+                # cons_lines[i][1] = self.lens_proj([x2, y2], self.raw)
+                draw.line([x1,y1,x2,y2], fill='white', width=7)
         self.img.save(fn)
         # fig, ax = plt.subplots(1,1, dpi = self.dpi)
         # ax.imshow(self.img, origin='upper')
