@@ -84,7 +84,7 @@ class FishEyeImage():
         data4t3 = data.astype(np.uint16)
         data4t3[data4t3 <= 0] = 0
         img4t3 = Image.fromarray(data4t3)
-        self.solution = t3.solve_from_image(img4t3, distortion=[-0.5, 0])
+        self.solution = t3.solve_from_image(img4t3, distortion=-0.0085542)
         print(self.solution)
         self.ra = self.solution['RA']/180*np.pi
         self.dec = self.solution['Dec']/180*np.pi
@@ -129,19 +129,6 @@ class FishEyeImage():
                 # cons_lines[i][1] = self.lens_proj([x2, y2], self.raw)
                 draw.line([x1,y1,x2,y2], fill='white', width=7)
         self.img.save(fn)
-        # fig, ax = plt.subplots(1,1, dpi = self.dpi)
-        # ax.imshow(self.img, origin='upper')
-
-        # # ax = plt.gca()
-        # ax.add_collection(
-        #     LineCollection(cons_lines,
-        #                    linewidths=0.75,
-        #                    colors='silver'))
-        # ax.axis('off')
-        # fig.tight_layout()
-        # plt.show()
-
-        # plt.savefig(fn,bbox_inches='tight',pad_inches=0,dpi=self.dpi)
 
     # def detect_stars(self, res=500):
     #     stars_xy = Table()
