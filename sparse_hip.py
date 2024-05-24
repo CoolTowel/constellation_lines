@@ -3,25 +3,44 @@ from astropy.table import Table
 import numpy as np
 import matplotlib.pyplot as plt
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 hips_star = Table.read('HIP2_rad.fits')
 start = time.time()
 
-min_sep=[]
-for i in range(1000):
-    ra = hips_star[i]['RA']
-    dec = hips_star[i]['DEC']
-    others = hips_star[~(hips_star['HIP']==hips_star[i]['HIP'])]
-    others = others[(others['RA']-ra)<0.1]
-    others = others[(others['DEC']-dec)<0.1]
-    sep = []
-    for j in range(len(others)):
-        sep.append(angular_separation(ra, dec,others[j]['RA'],others[j]['DEC']))
-    min_sep.append(np.min(sep))
+hips_star = hips_star[hips_star['Hpmag']<6]
 
+ra_all = hips_star['RA']
+dec_all = hips_star['DEC']
+hip_all = hips_star['HIP']
+
+def calculate_min_separation(i):
+    ra = ra_all[i]
+    dec = dec_all[i]
+    hip = hip_all[i]
+    delta_ra = np.abs(ra_all - ra)
+    mask = delta_ra>np.pi
+    delta_ra[mask] = 2*np.pi - delta_ra[mask]
+    mask = (hip_all != hip) & (delta_ra < 0.2) & (np.abs(dec_all - dec) < 0.2)
+    if np.sum(mask)==0 :
+        return 0.1
+    
+    others_ra = ra_all[mask]
+    others_dec = dec_all[mask]
+
+    sep = angular_separation(ra, dec, others_ra, others_dec)
+    return np.min(sep)
+
+min_sep = []
+with ThreadPoolExecutor() as executor:
+    futures = [executor.submit(calculate_min_separation, i) for i in range(len(hips_star))]
+    for future in futures:
+        min_sep.append(future.result())
+
+np.save('min_sep.npy',min_sep)
 end = time.time()
 total_time = end - start
-print(str(total_time)+'s')
+print(f"Total time: {total_time:.2f}s")
 
 print(np.min(min_sep)/np.pi*180*60)
 plt.hist(np.asarray(min_sep)/np.pi*60*180)

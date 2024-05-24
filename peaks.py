@@ -7,9 +7,9 @@ from astropy.stats import sigma_clipped_stats
 import numpy as np
 import matplotlib.pyplot as plt
 
-hips_star = Table.read('hip_for_cal.fits')
+hips_star = Table.read('hip2.fits')
 
-file = '003_0682'
+file = '291A2094'
 
 pic = FishEyeImage(file+'.jpg', file+'.CR3')
 
@@ -44,7 +44,7 @@ def detect_stars(self, res=500):
         for j in range(self.raw.shape[1]//res):
             data = self.raw[i*res:(i+1)*res, j*res:(j+1)*res]
             mean, median, std = sigma_clipped_stats(data, sigma=3.0)
-            threshold = median + (20 * std)
+            threshold = median + (15 * std)
             # stars_found = find_peaks(data, threshold, box_size=11)
             stars_founder = DAOStarFinder(fwhm=5, threshold=20.*std)
             stars_found = stars_founder(data - median)
@@ -63,7 +63,7 @@ stars_det_positions = np.transpose(
     (stars_det_bright['xcentroid'], stars_det_bright['ycentroid']))
 
 
-val_stars = get_stars(solution=solution,max_mag=1,min_mag=7)
+val_stars = get_stars(solution=solution,max_mag=-1,min_mag=6)
 r = tt11(val_stars['seprataion'])/0.006
 x = r * np.cos(val_stars['position_angle'])
 y = r * np.sin(val_stars['position_angle'])
@@ -74,7 +74,7 @@ validate_positions = rot(rot([x, y], np.pi/2), roll)
 validate_positions = np.dot([[1, 0], [0, -1]], validate_positions)
 validate_positions[0] += (pic.raw.shape[1]/2)-0.5
 validate_positions[1] += (pic.raw.shape[0]/2)-0.5
-validate_apertures = CircularAperture(validate_positions.T, r=4)
+validate_apertures = CircularAperture(validate_positions.T, r=2)
 show_data = np.log(pic.raw)
 vmin = np.log(np.median(show_data)-0.1*np.std(show_data))
 vmax = 1.4*np.log(np.std(show_data))
@@ -82,7 +82,7 @@ _ = validate_apertures.plot(color='red', lw=3.0)
 
 plt.imshow(show_data)
 
-validate_apertures = CircularAperture(stars_det_positions, r=4.0)
+validate_apertures = CircularAperture(stars_det_positions, r=2)
 validate_apertures.plot(color='blue', lw=1.5)
 
 plt.show()
