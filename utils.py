@@ -4,14 +4,14 @@ from PIL import Image, ImageDraw
 from astropy.io import fits
 from astropy.table import Table, vstack
 from matplotlib.collections import LineCollection
-from astropy.coordinates import angular_separation, position_angle
+from astropy.coordinates import angular_separation, position_angle, offset_by, SkyCoord
 # from photutils.aperture import CircularAperture
 from astropy.stats import sigma_clipped_stats
 # from photutils.detection import find_peaks
 import tetra3
 import rawpy
 import exiftool
-
+from photutils.detection import find_peaks, DAOStarFinder
 
 
 t3 = tetra3.Tetra3()
@@ -42,22 +42,22 @@ def x_y(ra1, dec1, ra2, dec2, lens_func=tt11, pixel_size=0.006):
 
 
 class FishEyeImage():
-    def __init__(self, img_path, raw_path, raw_iso_corr = False, f=14.6, k=-0.19, pixel_size=None, sensor = 'full_frame'):
+    def __init__(self, img_path, raw_path, raw_iso_corr=False, f=14.6, k=-0.19, pixel_size=None, sensor='full_frame'):
         self.k = k
         self.f = f
         with rawpy.imread(raw_path) as rawfile:
             raw = rawfile.postprocess(
-                gamma=(1, 1), no_auto_bright=True, output_bps=16)
+                gamma=(1, 1), no_auto_bright=True, output_bps=16)[16:4016,20:6020]
         self.img = Image.open(img_path)
         with exiftool.ExifToolHelper() as et:
             self.iso = et.get_metadata(raw_path)[0]['EXIF:ISO']
 
-        self.raw = np.array(raw)[:, :, 1]
+        self.raw = np.mean(np.asarray(raw),axis=-1)
         if raw_iso_corr:
             self.raw[self.raw < 60000] = self.raw[self.raw <
-                                                60000]//(self.iso/1600)
+                                                  60000]//(self.iso/1600)
         # self.raw = np.array(raw)
-        if pixel_size is not None: 
+        if pixel_size is not None:
             self.pixel_size = pixel_size
         else:
             if sensor == 'full_frame':
@@ -65,15 +65,22 @@ class FishEyeImage():
             elif sensor == 'apsc':
                 self.pixel_size = 24/self.raw.shape[0]/1.55
 
-    def lens_func(self, theta):  #see https://ptgui.com/support.html#3_28 
-        if self.k>=-1 and self.k<0:
+    def lens_func(self, theta):  # see https://ptgui.com/support.html#3_28
+        if self.k >= -1 and self.k < 0:
             r = self.f*np.sin(self.k*theta)/self.k
-        elif self.k==0:
+        elif self.k == 0:
             r = self.f*theta
-        elif self.k>0 and self.k<=1:
+        elif self.k > 0 and self.k <= 1:
             r = self.f*np.tan(self.k*theta)/self.k
-            
+
         return r
+    
+    def reverse_lens_func(self,r):
+        if self.k >= -1 and self.k < 0:
+           theta = np.arcsin(self.k/self.f*r)/self.k
+
+        return theta
+
 
     def solve(self, solve_size=400):
         ii = (self.raw.shape[0]-solve_size)//2
@@ -103,7 +110,7 @@ class FishEyeImage():
 
     def constellation(self, fn='test.jpg', cons_file_path='conslines.npy'):
         cons_lines = np.load(cons_file_path)
-        cons_lines_xy = np.array([[0,0],[0,0]])
+        cons_lines_xy = np.array([[0, 0], [0, 0]])
         draw = ImageDraw.Draw(self.img)
 
         for i in range(cons_lines.shape[0]):
@@ -113,23 +120,69 @@ class FishEyeImage():
                 self.ra, self.dec, star_1[0]/180*np.pi, star_1[1]/180*np.pi, self.lens_func, self.pixel_size)
             x2, y2, angular_separation2 = x_y(
                 self.ra, self.dec, star_2[0]/180*np.pi, star_2[1]/180*np.pi, self.lens_func, self.pixel_size)
-            if angular_separation1<0.45*np.pi or angular_separation2<0.45*np.pi:
+            if angular_separation1 < 0.45*np.pi or angular_separation2 < 0.45*np.pi:
                 if x2 < x1:
                     x1, x2 = x2, x1
                     y1, y2 = y2, y1
                 k = (y2-y1)/(x2-x1)
-                break_for_star = 20 # 星座连线断开，露出恒星
+                break_for_star = 20  # 星座连线断开，露出恒星
                 x1 += break_for_star*np.cos(np.arctan(k))
                 y1 += break_for_star*np.sin(np.arctan(k))
                 x2 -= break_for_star*np.cos(np.arctan(k))
                 y2 -= break_for_star*np.sin(np.arctan(k))
-                x1,y1 = self.rot_shift([x1, y1], self.raw)-16
-                x2,y2 = self.rot_shift([x2, y2], self.raw)-16
+                x1, y1 = self.rot_shift([x1, y1], self.raw)
+                x2, y2 = self.rot_shift([x2, y2], self.raw)
                 # cons_lines_xy = np.append(cons_lines_xy,[line_vertex1,line_vertex2])
                 # cons_lines[i][1] = self.lens_proj([x2, y2], self.raw)
-                draw.line([x1,y1,x2,y2], fill='white', width=7)
+                draw.line([x1, y1, x2, y2], fill='white', width=7)
         self.img.save(fn)
 
+    def detect_stars(self, res=500):
+        self.stars_xy = Table()
+        for i in range(self.raw.shape[0]//res):
+            for j in range(self.raw.shape[1]//res):
+                data = self.raw[i*res:(i+1)*res, j*res:(j+1)*res]
+                mean, median, std = sigma_clipped_stats(data, sigma=3.0)
+                threshold = median + (20 * std)
+                # stars_found = find_peaks(data, threshold, box_size=11)
+                stars_founder = DAOStarFinder(fwhm=5, threshold=threshold)
+                stars_found = stars_founder(data - median)
+                if stars_found is not None:
+                    # stars_found['x_peak'] += j*res
+                    # stars_found['y_peak'] += i*res
+                    stars_found['xcentroid'] += j*res
+                    stars_found['ycentroid'] += i*res
+                    self.stars_xy = vstack([self.stars_xy, stars_found])
+        # stars_eq.add_column(stars_xy['peak_value'], name='peak_value')
+        return self.stars_xy
+    
+    def match(self, pixel_size=0.006, star_catalog='HIP2_rad.fits', mag_limit=6.5):
+        stars_x = self.stars_xy['xcentroid']
+        stars_y = self.stars_xy['ycentroid']
+        delta_x = stars_x-self.raw.shape[1]/2
+        delta_y = stars_y-self.raw.shape[0]/2
+        delta_xy = np.asarray([delta_x,delta_y])
+        delta_xy = np.dot([[1, 0], [0, -1]], delta_xy)
+        delta_xy = rot(delta_xy, -self.roll-np.pi/2)
+        r = np.sqrt(delta_x**2+delta_y**2)*pixel_size
+        pa = np.arctan2(delta_xy[1],delta_xy[0])
+        pa[pa<0] += 2*np.pi
+        theta = self.reverse_lens_func(r)
+        ra,dec = offset_by(self.ra, self.dec, pa, theta)
+        self.stars_eq = Table()
+        self.stars_eq.add_columns([ra,dec],names=['RA','DEC'])
+        detect_star_skycoords = SkyCoord(ra=ra, dec=dec,frame='icrs')
+        catalog = Table.read(star_catalog)
+        catalog = catalog[np.logical_and(catalog['Hpmag']<mag_limit,catalog['Hpmag']>1)]
+        catalog_skycoords = SkyCoord(ra=catalog['RA'],dec=catalog['DEC'],frame='icrs',unit='rad')
+        idx, d2d, d3d = catalog_skycoords.match_to_catalog_sky(detect_star_skycoords)
+        return idx, d2d, d3d
+
+    def get_cal_stars(self, star_table):
+        ang_sep_list = []
+        x_y_sep = x_y(self.ra,self.dec,star_table['RA'],star_table['DEC'])
+        
+        return 
     # def detect_stars(self, res=500):
     #     stars_xy = Table()
     #     for i in range(self.raw.shape[0]//res):
