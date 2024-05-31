@@ -181,8 +181,8 @@ class FishEyeImage():
         self.matched_stars_xy = self.stars_xy[self.matched_star_idx]
 
         return idx, d2d
-    
-    def draw_residual(self, parameters,dpi,**kwargs):
+
+    def draw_residual(self, parameters, dpi, **kwargs):
         stars_ra, stars_dec, matched_stars_theta, matched_stars_pa = self.xy_to_eq(
             self.matched_stars_xy['xcentroid'], self.matched_stars_xy['ycentroid'], c_ra=parameters[0], c_dec=parameters[1], roll=parameters[2], f=parameters[3], k=parameters[4])
         stars_skycoords = SkyCoord(
@@ -204,24 +204,25 @@ class FishEyeImage():
             parameters[0]*u.rad, parameters[1]*u.rad, self.matched_catalog_skycoords.ra, self.matched_catalog_skycoords.dec)
         xy_sep = np.sqrt(
             (matched_stars_delta_xy[0]-catalog_x)**2+(matched_stars_delta_xy[1]-catalog_y)**2)
-        
+
         theta_rs = matched_stars_theta-catalog_theta
         pa_rs = matched_stars_pa-catalog_pa
 
         # catalog_theta = angular_separation(
         #     parameters[0]*u.rad, parameters[1]*u.rad, self.matched_catalog_stars['RA'], self.matched_catalog_stars['DEC']).to(u.deg)
-        fig, axs = plt.subplots(2, 2,dpi=dpi)
+        fig, axs = plt.subplots(2, 2, dpi=dpi)
         for ax in axs.flatten():
             ax.set_xlabel('theta to center [deg]')
 
-        axs[0,0].scatter(catalog_theta.to(u.deg), ang_sep.to(u.arcmin),**kwargs)
-        axs[0,0].set_ylabel('angular sepration [arcmin]')
-        axs[0,1].scatter(catalog_theta.to(u.deg), xy_sep,**kwargs)
-        axs[0,1].set_ylabel('xy sepration [pixel]')
-        axs[1,0].scatter(catalog_theta.to(u.deg), theta_rs,**kwargs)
-        axs[1,0].set_ylabel('theta res [arcmin]')
-        axs[1,1].scatter(catalog_theta.to(u.deg), pa_rs,**kwargs)
-        axs[1,1].set_ylabel('position angle res [arcmin]')
+        axs[0, 0].scatter(catalog_theta.to(u.deg),
+                          ang_sep.to(u.arcmin), **kwargs)
+        axs[0, 0].set_ylabel('angular sepration [arcmin]')
+        axs[0, 1].scatter(catalog_theta.to(u.deg), xy_sep, **kwargs)
+        axs[0, 1].set_ylabel('xy sepration [pixel]')
+        axs[1, 0].scatter(catalog_theta.to(u.deg), theta_rs, **kwargs)
+        axs[1, 0].set_ylabel('theta res [arcmin]')
+        axs[1, 1].scatter(catalog_theta.to(u.deg), pa_rs, **kwargs)
+        axs[1, 1].set_ylabel('position angle res [arcmin]')
         plt.tight_layout()
         plt.show()
 
