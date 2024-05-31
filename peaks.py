@@ -1,4 +1,4 @@
-from utils import FishEyeImage, tt11, rot
+from utils import FishEyeImage, rot
 from photutils.detection import find_peaks, DAOStarFinder
 from photutils.aperture import CircularAperture
 from astropy.coordinates import angular_separation, position_angle
@@ -7,23 +7,28 @@ from astropy.stats import sigma_clipped_stats
 import numpy as np
 import matplotlib.pyplot as plt
 
-hips_star = Table.read('hip2.fits')
+hips_star = Table.read('HIP2_rad.fits')
 
-file = '291A2094'
+file = 'IMG_8814'
 
 pic = FishEyeImage(file+'.jpg', file+'.CR3')
 
 solution = pic.solve(solve_size=1200)
 
-def get_stars(solution, max_mag, min_mag):
+pic.detect_stars()
+pic.detect_stars_eq()
+init , final = pic.plate_optimize(ra_dec_range=3, roll_range=4,f_range=0.5,k_range=0.2)
+final = final.x
+ra = final[0]
+dec= final[1]
+
+def hip_stars(ra,dec, max_mag, min_mag):
     hips_mag = hips_star[np.logical_and(
-        hips_star['Vmag'] <= min_mag, hips_star['Vmag'] >= max_mag)]
+        hips_star['Hpmag'] <= min_mag, hips_star['Hpmag'] >= max_mag)]
     ang_sep_list = []
-    ra = solution['RA']/180*np.pi
-    dec = solution['Dec']/180*np.pi
     for i in range(len(hips_mag)):
         ang_sep = angular_separation(
-            ra, dec, hips_mag[i]['RAdeg']/180*np.pi, hips_mag[i]['DEdeg']/180*np.pi)
+            ra, dec, hips_mag[i]['RA'], hips_mag[i]['DEC'])
         ang_sep_list.append(ang_sep)
     hips_mag.add_column(ang_sep_list, name='seprataion')
     stars_table = hips_mag[hips_mag['seprataion']
@@ -32,7 +37,7 @@ def get_stars(solution, max_mag, min_mag):
     pa_list = []
     for i in range(len(stars_table)):
         pa = position_angle(
-            ra, dec, stars_table[i]['RAdeg']/180*np.pi, stars_table[i]['DEdeg']/180*np.pi)
+            ra, dec, stars_table[i]['RA'], stars_table[i]['DEC'])
         pa_list.append(pa)
     stars_table.add_column(pa_list, name='position_angle')
 
@@ -57,18 +62,18 @@ def detect_stars(self, res=500):
     stars_eq = Table()
     # stars_eq.add_column(stars_xy['peak_value'], name='peak_value')
     return stars_xy
-stars_det = detect_stars(pic)
+stars_det = pic.detect_stars()
 stars_det_bright = stars_det
 stars_det_positions = np.transpose(
     (stars_det_bright['xcentroid'], stars_det_bright['ycentroid']))
 
 
-val_stars = get_stars(solution=solution,max_mag=-1,min_mag=6)
-r = tt11(val_stars['seprataion'])/0.006
+val_stars = hip_stars(ra,dec,max_mag=-1,min_mag=6.5)
+r = pic.lens_func(val_stars['seprataion'],f=final[3],k=final[4])/0.006
 x = r * np.cos(val_stars['position_angle'])
 y = r * np.sin(val_stars['position_angle'])
 
-roll = solution['Roll']/180*np.pi
+roll = final[2]
 
 validate_positions = rot(rot([x, y], np.pi/2), roll)
 validate_positions = np.dot([[1, 0], [0, -1]], validate_positions)
@@ -78,7 +83,7 @@ validate_apertures = CircularAperture(validate_positions.T, r=2)
 show_data = np.log(pic.raw)
 vmin = np.log(np.median(show_data)-0.1*np.std(show_data))
 vmax = 1.4*np.log(np.std(show_data))
-_ = validate_apertures.plot(color='red', lw=3.0)
+_ = validate_apertures.plot(color='red', lw=1.5)
 
 plt.imshow(show_data)
 
