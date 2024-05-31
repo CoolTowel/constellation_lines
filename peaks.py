@@ -17,7 +17,7 @@ solution = pic.solve(solve_size=1200)
 
 pic.detect_stars()
 pic.detect_stars_eq()
-init , final = pic.plate_optimize(ra_dec_range=3, roll_range=4,f_range=0.5,k_range=0.2)
+init , final = pic.plate_optimize(ra_dec_range=3, roll_range=4,f_range=50,k_range=4)
 final = final.x
 ra = final[0]
 dec= final[1]
