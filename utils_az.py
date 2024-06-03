@@ -85,8 +85,8 @@ class FishEyeImage():
                 self.pixel_size = 24/self.height/1.55
 
         self.catalog = Table.read(star_catalog)
-        self.catalog = self.catalog[np.logical_and(
-            self.catalog['Hpmag'] < mag_limit, self.catalog['Hpmag'] > 1)]
+        self.catalog = self.catalog[
+            (self.catalog['Hpmag'] < mag_limit)&(self.catalog['Hpmag'] > -2)]
         self.catalog_skycoords = SkyCoord(
             ra=self.catalog['RA'], dec=self.catalog['DEC'], frame='icrs', unit='rad')
         self.az_frame = AltAz(obstime=self.obstime, location=self.loc, pressure=alt2pres(
