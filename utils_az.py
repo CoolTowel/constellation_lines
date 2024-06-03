@@ -4,7 +4,7 @@ from PIL import Image, ImageDraw
 from astropy.io import fits
 from astropy.table import Table, vstack
 from matplotlib.collections import LineCollection
-from astropy.coordinates import angular_separation, position_angle, offset_by, SkyCoord
+from astropy.coordinates import SkyCoord, EarthLocation, AltAz, angular_separation, position_angle, offset_by
 # from photutils.aperture import CircularAperture
 from astropy.stats import sigma_clipped_stats
 # from photutils.detection import find_peaks
@@ -19,6 +19,11 @@ from scipy.optimize import minimize, curve_fit
 
 t3 = tetra3.Tetra3()
 
+def alt2pres(altitude):
+    # https://pvlib-python.readthedocs.io/en/stable/_modules/pvlib/atmosphere.html
+    press = 100 * ((44331.514 - altitude) / 11880.516) ** (1 / 0.1902632)
+
+    return press/100*u.hPa
 
 def rot(vectors, deg):
     R_M = [[np.cos(deg), -np.sin(deg)],
@@ -51,8 +56,8 @@ class FishEyeImage():
             time = exif['EXIF:DateTimeOriginal']
             offset = exif['EXIF:OffsetTime']
         time = time.replace(':','-',2)
-        self.time = Time(time)-int(offset[0:3])*u.hour
-
+        self.obstime = Time(time)-int(offset[0:3])*u.hour
+        
         self.raw = np.mean(np.asarray(raw), axis=-1)
         if raw_iso_corr:
             self.raw[self.raw < 60000] = self.raw[self.raw <
@@ -72,14 +77,51 @@ class FishEyeImage():
         self.catalog = Table.read(star_catalog)
         self.catalog = self.catalog[np.logical_and(
             self.catalog['Hpmag'] < mag_limit, self.catalog['Hpmag'] > 1)]
+        self.catalog_skycoords = SkyCoord(
+            ra=self.catalog['RA'], dec=self.catalog['DEC'], frame='icrs', unit='rad')
+        self.az = AltAz(obstime=self.obstime, location=self.loc, pressure = alt2pres(self.loc.height.value),temperature=0*u.deg_C,relative_humidity=0.5,obswl=550*u.nm)
+        self.catalog_azcoords = self.catalog_skycoords.transform_to(self.az)
 
-    def eq_to_xy(self, ra1, dec1, ra2, dec2, lens_func=None, pixel_size=None):
+    def solve(self, solve_size=800):
+        ii = (self.height-solve_size)//2
+        jj = (self.width-solve_size)//2
+        data = self.raw[ii:ii+solve_size, jj:jj+solve_size]
+        data4t3 = data.astype(np.uint16)
+        data4t3[data4t3 <= 0] = 0
+        img4t3 = Image.fromarray(data4t3)
+        self.solution = t3.solve_from_image(img4t3, distortion=-0.008)
+        print(self.solution)
+        self.center_ra = self.solution['RA']/180*np.pi
+        self.center_dec = self.solution['Dec']/180*np.pi
+        self.eq_roll = self.solution['Roll']/180*np.pi
+        center_eq = SkyCoord(ra = self.center_dec, dec = self.center_dec, frame='icrs', unit='rad')
+        self.center_az = center_eq.transfrom_to(self.az)
+        eq_of_zenith = AltAz(alt=90*u.deg,az=0*u.deg,obstime=self.obstime, location=self.loc, pressure = alt2pres(self.loc.height.value),temperature=0*u.deg_C,relative_humidity=0.5,obswl=550*u.nm).transform_to('icrs')
+        eq_of_north = SkyCoord(ra= 0, dec=90, frame='icrs',unit='deg')
+        cos_c = np.cos(angular_separation(eq_of_zenith.ra,eq_of_zenith.dec,eq_of_north.ra,eq_of_north.dec))
+        a = angular_separation(center_eq.ra, center_eq.dec,eq_of_north.ra,eq_of_north.dec)
+        b= angular_separation(center_eq.ra, center_eq.dec,eq_of_zenith.ra,eq_of_zenith.dec)
+        cos_a = np.cos(a)
+        cos_b = np.cos(b)
+        sin_a = np.sin(a)
+        sin_b = np.sin(b)
+        cos_C = (cos_c-cos_a*cos_b)/(sin_a*sin_b)
+        C = np.arccos(cos_C)
+        if C<0:
+            C += 2*np.pi
+        self.az_roll = self.roll-C
+        # https://en.wikipedia.org/wiki/Spherical_law_of_cosines
+        
+        return self.solution
+
+
+    def az_to_xy(self, az, alt, lens_func=None, pixel_size=None):
         if lens_func is None:
             lens_func = self.lens_func
         if pixel_size is None:
             pixel_size = self.pixel_size
         ang_sep = angular_separation(
-            ra1, dec1, ra2, dec2)
+            self.az,self.alt,)
         pa = position_angle(
             ra1, dec1, ra2, dec2)
         r = lens_func(ang_sep)/pixel_size
@@ -119,21 +161,7 @@ class FishEyeImage():
                          self.c*r**3 + self.d*r**2 + self.e*r)
         return theta
 
-    def solve(self, solve_size=400):
-        ii = (self.height-solve_size)//2
-        jj = (self.width-solve_size)//2
 
-        data = self.raw[ii:ii+solve_size, jj:jj+solve_size]
-
-        data4t3 = data.astype(np.uint16)
-        data4t3[data4t3 <= 0] = 0
-        img4t3 = Image.fromarray(data4t3)
-        self.solution = t3.solve_from_image(img4t3, distortion=-0.0085542)
-        print(self.solution)
-        self.ra = self.solution['RA']/180*np.pi
-        self.dec = self.solution['Dec']/180*np.pi
-        self.roll = self.solution['Roll']/180*np.pi
-        return self.solution
 
     def rot_shift(self, xy, image_to_show):
         xy = rot(rot(xy, np.pi/2), self.roll)
