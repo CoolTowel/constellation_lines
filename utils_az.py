@@ -13,6 +13,8 @@ import rawpy
 import exiftool
 from photutils.detection import find_peaks, DAOStarFinder
 import astropy.units as u
+from astropy.time import Time
+
 from scipy.optimize import minimize, curve_fit
 
 t3 = tetra3.Tetra3()
@@ -36,21 +38,25 @@ def x_y(ra1, dec1, ra2, dec2, lens_func, pixel_size=0.006):
 
 
 class FishEyeImage():
-    def __init__(self, img_path, raw_path, raw_iso_corr=False, f=14.6, k=-0.19, pixel_size=0.006, sensor='full_frame', star_catalog='HIP2_rad.fits', mag_limit=6.5):
+    def __init__(self, raw_path, loc, raw_iso_corr=False, f=14.6, k=-0.19, pixel_size=0.006, sensor='full_frame', star_catalog='HIP2_rad.fits', mag_limit=6.5):
         self.k = k
         self.f = f
+        self.loc=loc
         with rawpy.imread(raw_path) as rawfile:
             raw = rawfile.postprocess(
                 gamma=(1, 1), no_auto_bright=True, output_bps=16)[16:4016, 20:6020]
-        self.img = Image.open(img_path)
+            
         with exiftool.ExifToolHelper() as et:
-            self.iso = et.get_metadata(raw_path)[0]['EXIF:ISO']
+            exif = et.get_metadata(raw_path)[0]
+            time = exif['EXIF:DateTimeOriginal']
+            offset = exif['EXIF:OffsetTime']
+        time = time.replace(':','-',2)
+        self.time = Time(time)-int(offset[0:3])*u.hour
 
         self.raw = np.mean(np.asarray(raw), axis=-1)
         if raw_iso_corr:
             self.raw[self.raw < 60000] = self.raw[self.raw <
                                                   60000]//(self.iso/1600)
-        # self.raw = np.array(raw)
         self.height = self.raw.shape[0]
         self.width = self.raw.shape[1]
         self.c_x = self.raw.shape[1]/2
