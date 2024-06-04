@@ -93,7 +93,7 @@ class FishEyeImage():
             self.loc.height.value), temperature=0*u.deg_C, relative_humidity=0.5, obswl=550*u.nm)
         self.catalog_skycoords = self.catalog_skycoords.transform_to(
             self.az_frame)
-        self.ks = [0]*5
+        self.distortion_paras = np.zeros(5)
 
     def solve(self, solve_size=800):
         ii = (self.height-solve_size)//2
@@ -120,19 +120,25 @@ class FishEyeImage():
         return self.solution
 
     # see https://ptgui.com/support.html#3_28
-    def lens_func(self, theta, f, k, ks=[0]*5):
-        # r = f*np.sin(k*theta)/k
-        def func(r,theta):
-            return np.arcsin(r*k/f)/k-(ks[0]*r**5 + ks[1]*r**4 + ks[2]*r**3 + ks[3]*r**2 + ks[4]*r)-theta
-        r = []
-        for y in theta:
-            r.append(fsolve(func, 10,args=(y))[0])
-        # return r
-        return np.asarray(r)
+    def lens_func(self, theta, f, k):
+        r = f*np.sin(k*theta)/k
+        return r
+    
+    # def distortion(self,u,v, distortion_paras):
+    #     k1,k2,q1,p1,p2 = distortion_paras/10000
+    #     uv2 = u**2+v**2
+    #     distortion_u= k1*u*uv2+k2*u*uv2**2+q1*uv2+u*(p1*u+p2*v)
+    #     distortion_v= k1*v*uv2+k2*v*uv2**2+q1*uv2+v*(p1*v+p2*u)
 
-    def reverse_lens_func(self, r, f, k, ks):
+    #     return distortion_u,distortion_v
+
+    def distortion(self,theta, ks):
+        k1,k2,k3,k4 = ks
+        d_theta = theta(k1*theta+k2*theta**3,k3*theta**5+k4*theta**7)
+        return d_theta
+    
+    def reverse_lens_func(self, r, f, k):
         theta = np.arcsin(r*k/f)/k
-        theta -= (ks[0]*r**5 + ks[1]*r**4 + ks[2]*r**3 + ks[3]*r**2 + ks[4]*r)
         return theta
 
     def rot_shift(self, xy, image_to_show):
@@ -142,22 +148,14 @@ class FishEyeImage():
         xy[1] += (image_to_show.shape[0]/2)
         return xy
 
-    def az_to_delta_xy(self, c_az, c_alt, az, alt, f, k, ks=[0]*5):
+    def az_to_delta_xy(self, c_az, c_alt, az, alt, f, k):
         ang_sep = angular_separation(c_az, c_alt, az, alt)
         pa = -position_angle(c_az, c_alt, az, alt)
-        r = self.lens_func(ang_sep.to(u.rad).value, f, k, ks)/self.pixel_size
+        r = self.lens_func(ang_sep.to(u.rad).value, f, k)/self.pixel_size
         x = r * np.cos(pa)
         y = r * np.sin(pa)
         return x, y, ang_sep.to(u.arcmin), pa.to(u.arcmin)
-    
-    def delta_xy_to_xy(self, delta_x, delta_y, c_x, c_y, roll):
-        delta_xy = np.asarray([delta_x, delta_y])
-        delta_xy = rot(delta_xy, roll+np.pi/2)
-        delta_xy = np.dot([[1, 0], [0, -1]], delta_xy)
-        x = delta_xy[0] + c_x
-        y = delta_xy[1] + c_y
-        return [x,y]
-    
+
     def xy_to_delta_xy(self, x, y, c_x, c_y, roll):
         delta_x = x - c_x
         delta_y = y - c_y
@@ -166,12 +164,19 @@ class FishEyeImage():
         delta_xy = rot(delta_xy, -roll-np.pi/2)
         return delta_xy
 
-
-    def xy_to_az(self, c_az, c_alt, x, y, c_x, c_y, roll, f, k, ks=[0]*5):
-        delta_xy = self.xy_to_delta_xy(x, y, c_x, c_y, roll)
-        r = np.sqrt(delta_xy[0]**2+delta_xy[1]**2)*self.pixel_size
+    def delta_xy_to_xy(self, delta_x, delta_y, c_x, c_y, roll):
+        delta_xy = np.asarray([delta_x, delta_y])
+        delta_xy = rot(delta_xy, roll+np.pi/2)
+        delta_xy = np.dot([[1, 0], [0, -1]], delta_xy)
+        x = delta_xy[0] + c_x
+        y = delta_xy[1] + c_y
+        return [x,y]
+    
+    def xy_to_az(self, c_az, c_alt, x, y, c_x, c_y, roll, f, k):
+        delta_xy = self.xy_to_delta_xy(x, y, c_x, c_y, roll)*self.pixel_size
+        r = np.sqrt(delta_xy[0]**2+delta_xy[1]**2)
         pa = np.arctan2(delta_xy[1], delta_xy[0])
-        theta = self.reverse_lens_func(r, f, k, ks)
+        theta = self.reverse_lens_func(r, f, k)
         az, alt = offset_by(c_az, c_alt, -pa, theta)
         return az, alt, (theta*u.rad).to(u.arcmin), (pa*u.rad).to(u.arcmin)
 
@@ -234,7 +239,7 @@ class FishEyeImage():
             c_az=self.az, c_alt=self.alt,
             x=self.matched_stars_xy['xcentroid'], y=self.matched_stars_xy['ycentroid'],
             c_x=self.c_x, c_y=self.c_y,
-            roll=self.az_roll, f=self.f, k=self.k, ks=self.ks
+            roll=self.az_roll, f=self.f, k=self.k
         )
         ang_sep = angular_separation(
             stars_az, stars_alt, self.matched_catalog_skycoords.az, self.matched_catalog_skycoords.alt)
@@ -244,7 +249,7 @@ class FishEyeImage():
             c_alt = self.alt*u.rad,
             az = self.matched_catalog_skycoords.az, 
             alt = self.matched_catalog_skycoords.alt,
-            f = self.f, k = self.k,ks=self.ks
+            f = self.f, k = self.k
         )
 
         stars_delta_xy = self.xy_to_delta_xy(
@@ -279,60 +284,53 @@ class FishEyeImage():
         plt.tight_layout()
         plt.show()
 
-    def lens_optimize(self, az_alt_range=3, roll_range=4, f_range=1, k_range=0.2):
+    def plate_optimize(self, az_alt_range=3, roll_range=4, f_range=1, k_range=0.2,cxy_range=200):
         az_alt_range = az_alt_range/180*np.pi
         roll_range = roll_range/180*np.pi
 
         def star_rms(x):
             """
-            x = [az,alt,roll,f,k]
+            x = [az,alt,roll,f,k,c_x,c_y]
             """
             stars_az, stars_alt, _, _ = self.xy_to_az(
                 c_az=x[0], c_alt=x[1],
                 x=self.matched_stars_xy['xcentroid'], 
                 y=self.matched_stars_xy['ycentroid'],
-                c_x=self.c_x, c_y=self.c_y,
-                roll=x[2], f=x[3], k=x[4],ks=self.ks)
+                c_x=x[5], c_y=x[6],
+                roll=x[2], f=x[3], k=x[4],distortion_paras=self.distortion_paras)
             stars_skycoords = SkyCoord(
                 az=stars_az, alt=stars_alt, frame=self.az_frame)
             _, ang_sep, _ = self.matched_catalog_skycoords.match_to_catalog_sky(
                 stars_skycoords)
             ang_sep = ang_sep.to(u.arcmin).value
             return np.sqrt(np.mean(ang_sep**2))
-        init = np.asarray([self.az, self.alt, self.az_roll, self.f, self.k])
+        init = np.asarray([self.az, self.alt, self.az_roll, self.f, self.k,self.c_x,self.c_y])
         ranges = np.asarray([az_alt_range, az_alt_range,
-                            roll_range, f_range, k_range])
+                            roll_range, f_range, k_range,cxy_range, cxy_range])
         bonds = np.vstack([init-ranges/2, init+ranges/2]).T
         result = minimize(fun=star_rms, x0=init, bounds=bonds)
         return init, result
 
-    def plate_optimize(self, az_alt_range=8, roll_range=8, c_xy_range=200):
-        az_alt_range = az_alt_range/180*np.pi
-        roll_range = roll_range/180*np.pi
+    # def distortion_optimize(self, distortion_paras_range=1):
+    #     def star_rms(x):
+    #         stars_az, stars_alt, _, _ = self.xy_to_az(
+    #             c_az=self.az, c_alt=self.alt,
+    #             x=self.matched_stars_xy['xcentroid'], 
+    #             y=self.matched_stars_xy['ycentroid'],
+    #             c_x=self.c_x, c_y=self.c_y,
+    #             roll=self.az_roll, f=self.f, k=self.k,distortion_paras=x)
+    #         stars_skycoords = SkyCoord(
+    #             az=stars_az, alt=stars_alt, frame=self.az_frame)
+    #         _, ang_sep, _ = self.matched_catalog_skycoords.match_to_catalog_sky(
+    #             stars_skycoords)
+    #         ang_sep = ang_sep.to(u.arcmin).value
+    #         return np.sqrt(np.mean(ang_sep**2))
+    #     init = self.distortion_paras
+    #     ranges = np.asarray([distortion_paras_range]*5)
+    #     bonds = np.vstack([init-ranges/2, init+ranges/2]).T
+    #     result = minimize(fun=star_rms, x0=init, bounds=bonds)
 
-        def star_rms(x):
-            """
-            x = [az,alt,roll,cx,cy]
-            """
-            stars_az, stars_alt, _, _ = self.xy_to_az(
-                c_az=x[0], c_alt=x[1],
-                x=self.matched_stars_xy['xcentroid'], 
-                y=self.matched_stars_xy['ycentroid'],
-                c_x=x[3], c_y=x[4],
-                roll=x[2], f=self.f, k=self.k,ks=self.ks)
-            stars_skycoords = SkyCoord(
-                az=stars_az, alt=stars_alt, frame=self.az_frame)
-            _, ang_sep, _ = self.matched_catalog_skycoords.match_to_catalog_sky(
-                stars_skycoords)
-            ang_sep = ang_sep.to(u.arcmin).value
-            return np.sqrt(np.mean(ang_sep**2))
-        init = np.asarray([self.az, self.alt, self.az_roll, self.c_x, self.c_y])
-        ranges = np.asarray([az_alt_range, az_alt_range,
-                            roll_range, c_xy_range, c_xy_range])
-        bonds = np.vstack([init-ranges/2, init+ranges/2]).T
-        result = minimize(fun=star_rms, x0=init, bounds=bonds)
-
-        return init, result
+    #     return init, result
 
     def distort_optimize(self):
         catalog_theta = angular_separation(
