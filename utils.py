@@ -36,7 +36,8 @@ def x_y(ra1, dec1, ra2, dec2, lens_func, pixel_size=0.006):
 
 
 class FishEyeImage():
-    def __init__(self, img_path, raw_path, raw_iso_corr=False, f=14.6, k=-0.19, pixel_size=0.006, sensor='full_frame', star_catalog='HIP2_rad.fits', mag_limit=6.5):
+    def __init__(self, img_path, raw_path, raw_iso_corr=False, 
+                 f=14.6, k=-0.19, pixel_size=0.006, sensor='full_frame', star_catalog='HIP2_rad.fits', mag_limit=6.5):
         self.k = k
         self.f = f
         with rawpy.imread(raw_path) as rawfile:
