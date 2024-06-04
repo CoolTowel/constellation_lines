@@ -180,7 +180,7 @@ class FishEyeImage():
         matched_idx = idx[sep_constraint]
         self.star_skycoords = detect_star_skycoords[matched_idx]
         self.stars_uv = np.asarray(
-            [self.stars_uv['xcentroid'][matched_idx], self.stars_uv['xcentroid'][matched_idx]])
+            [self.stars_uv['xcentroid'][matched_idx], self.stars_uv['ycentroid'][matched_idx]])
         return np.sqrt(np.mean((sep[sep_constraint].to(u.arcmin))**2))
 
     def lens_func(self, theta, lens_para=None):  # see https://ptgui.com/support.html#3_28
@@ -245,7 +245,7 @@ class FishEyeImage():
         lon, lat, star_theta , star_pa = self.xy2wcs(star_x, star_y)
         stars_skycoords = SkyCoord(lon, lat, frame=self.frame)
         _, ang_sep, _ = self.catalog_skycoords.match_to_catalog_sky(stars_skycoords)
-
+        print(np.sqrt(np.mean((ang_sep.to(u.arcmin))**2)))
         if self.az_mode:
             catalog_lon = self.catalog_skycoords.az
             catalog_lat = self.catalog_skycoords.alt
@@ -299,7 +299,7 @@ class FishEyeImage():
             stars_skycoords = SkyCoord(lon, lat, frame=self.frame)
             _, ang_sep, _ = self.catalog_skycoords.match_to_catalog_sky(
                 stars_skycoords)
-            ang_sep = ang_sep.value
+            ang_sep = ang_sep.to(u.arcmin).value
             return np.sqrt(np.mean(ang_sep**2))
         init = np.asarray([self.plat_para['lon'], self.plat_para['lat'],
                 self.plat_para['roll'], self.plat_para['cu'], self.plat_para['cv']])
@@ -316,7 +316,7 @@ class FishEyeImage():
 
         # parameters = result.x
         # self.draw_residual(parameters)
-        return 0
+        return result
 
     def plate_optimize(self, ra_dec_range=8, roll_range=8, cxy_range=200):
         ra_dec_range = ra_dec_range/180*np.pi
