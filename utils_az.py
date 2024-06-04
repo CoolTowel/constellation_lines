@@ -110,25 +110,10 @@ class FishEyeImage():
         center_eq = SkyCoord(ra=self.center_ra,
                              dec=self.center_dec, frame='icrs', unit='rad')
         self.center_az = center_eq.transform_to(self.az_frame)
-        az_of_zenith = SkyCoord(az=0*u.deg, alt=90*u.deg, frame=self.az_frame)
-        eq_of_zenith = az_of_zenith.transform_to(ICRS)
-
         eq_of_north = SkyCoord(ra=0, dec=90, frame='icrs', unit='deg')
         az_of_north = eq_of_north.transform_to(self.az_frame)
-
-        cos_c = np.cos(angular_separation(az_of_north.az,az_of_north.alt,az_of_zenith.az,az_of_zenith.alt))
-        a = angular_separation(self.center_az.az,self.center_az.alt,az_of_north.az,az_of_north.alt)
-        b = angular_separation(self.center_az.az,self.center_az.alt,az_of_zenith.az,az_of_zenith.alt)
-        cos_a = np.cos(a)
-        cos_b = np.cos(b)
-        sin_a = np.sin(a)
-        sin_b = np.sin(b)
-        cos_C = (cos_c-cos_a*cos_b)/(sin_a*sin_b)
-        C = np.arccos(cos_C).value
-        # if C<0:
-        #     C += 2*np.pi
-        self.az_roll = self.eq_roll-C
-        # https://en.wikipedia.org/wiki/Spherical_law_of_cosines
+        c = position_angle(self.center_az.az,self.center_az.alt,az_of_north.az,az_of_north.alt)
+        self.az_roll = self.eq_roll+c.to('rad').value # 地平坐标经度自东向西增加，与天球坐标相反，故az坐标下计得所有pa需加负号处理。因此负负得正，此处为相加
         self.az = self.center_az.az.to('rad').value
         self.alt = self.center_az.alt.to('rad').value
 
@@ -151,7 +136,7 @@ class FishEyeImage():
         return theta
 
     def rot_shift(self, xy, image_to_show):
-        xy = rot(rot(xy, np.pi/2), self.roll)
+        xy = rot(rot(xy, np.pi/2), self.az_roll)
         xy = np.dot([[1, 0], [0, -1]], xy)
         xy[0] += (image_to_show.shape[1]/2)
         xy[1] += (image_to_show.shape[0]/2)
@@ -159,19 +144,11 @@ class FishEyeImage():
 
     def az_to_delta_xy(self, c_az, c_alt, az, alt, f, k, ks=[0]*5):
         ang_sep = angular_separation(c_az, c_alt, az, alt)
-        pa = position_angle(c_az, c_alt, az, alt)
+        pa = -position_angle(c_az, c_alt, az, alt)
         r = self.lens_func(ang_sep.to(u.rad).value, f, k, ks)/self.pixel_size
         x = r * np.cos(pa)
         y = r * np.sin(pa)
         return x, y, ang_sep.to(u.arcmin), pa.to(u.arcmin)
-
-    def xy_to_delta_xy(self, x, y, c_x, c_y, roll):
-        delta_x = x - c_x
-        delta_y = y - c_y
-        delta_xy = np.asarray([delta_x, delta_y])
-        delta_xy = np.dot([[1, 0], [0, -1]], delta_xy)
-        delta_xy = rot(delta_xy, -roll-np.pi/2)
-        return delta_xy
     
     def delta_xy_to_xy(self, delta_x, delta_y, c_x, c_y, roll):
         delta_xy = np.asarray([delta_x, delta_y])
@@ -180,14 +157,22 @@ class FishEyeImage():
         x = delta_xy[0] + c_x
         y = delta_xy[1] + c_y
         return [x,y]
+    
+    def xy_to_delta_xy(self, x, y, c_x, c_y, roll):
+        delta_x = x - c_x
+        delta_y = y - c_y
+        delta_xy = np.asarray([delta_x, delta_y])
+        delta_xy = np.dot([[1, 0], [0, -1]], delta_xy)
+        delta_xy = rot(delta_xy, -roll-np.pi/2)
+        return delta_xy
+
 
     def xy_to_az(self, c_az, c_alt, x, y, c_x, c_y, roll, f, k, ks=[0]*5):
         delta_xy = self.xy_to_delta_xy(x, y, c_x, c_y, roll)
         r = np.sqrt(delta_xy[0]**2+delta_xy[1]**2)*self.pixel_size
         pa = np.arctan2(delta_xy[1], delta_xy[0])
-        pa[pa < 0] += 2*np.pi
         theta = self.reverse_lens_func(r, f, k, ks)
-        az, alt = offset_by(c_az, c_alt, pa, theta)
+        az, alt = offset_by(c_az, c_alt, -pa, theta)
         return az, alt, (theta*u.rad).to(u.arcmin), (pa*u.rad).to(u.arcmin)
 
     def detect_stars(self, res=500):
@@ -218,14 +203,13 @@ class FishEyeImage():
             az=az, alt=alt, frame=self.az_frame)
         return [self.stars_xy['xcentroid'],self.stars_xy['ycentroid']], self.detect_star_skycoords
 
-    def first_match(self, bin_size=75, max_sep=20):
-        self.detect_stars_az()
+    def first_match(self, bin_size=100, max_sep=40):
+        # self.detect_stars_az()
         idx, d2d, _ = self.catalog_skycoords.match_to_catalog_sky(
             self.detect_star_skycoords)
         max_sep = max_sep*u.arcmin
         sep_constraint = d2d < max_sep
         self.matched_catalog_skycoords = self.catalog_skycoords[sep_constraint]
-        # self.matched_detect_stars_skycoords = self.detect_star_skycoords[idx[sep_constraint]]
         self.matched_stars_xy = self.stars_xy[idx[sep_constraint]]
         catalog_theta = angular_separation(
             self.az*u.rad, self.alt*u.rad, self.matched_catalog_skycoords.az, self.matched_catalog_skycoords.alt).to(u.deg)
@@ -250,7 +234,7 @@ class FishEyeImage():
             c_az=self.az, c_alt=self.alt,
             x=self.matched_stars_xy['xcentroid'], y=self.matched_stars_xy['ycentroid'],
             c_x=self.c_x, c_y=self.c_y,
-            roll=self.az_roll, f=self.f, k=self.k
+            roll=self.az_roll, f=self.f, k=self.k, ks=self.ks
         )
         ang_sep = angular_separation(
             stars_az, stars_alt, self.matched_catalog_skycoords.az, self.matched_catalog_skycoords.alt)
@@ -260,7 +244,7 @@ class FishEyeImage():
             c_alt = self.alt*u.rad,
             az = self.matched_catalog_skycoords.az, 
             alt = self.matched_catalog_skycoords.alt,
-            f = self.f, k = self.k
+            f = self.f, k = self.k,ks=self.ks
         )
 
         stars_delta_xy = self.xy_to_delta_xy(
@@ -295,67 +279,20 @@ class FishEyeImage():
         plt.tight_layout()
         plt.show()
 
-    # def draw_residual_dis(self, dpi, **kwargs):
-    #     stars_ra, stars_dec, matched_stars_theta, matched_stars_pa = self.xy_to_eq_distort(
-    #         self.matched_stars_xy['xcentroid'], self.matched_stars_xy['ycentroid'])
-    #     stars_skycoords = SkyCoord(
-    #         ra=stars_ra, dec=stars_dec, frame='icrs')
-    #     _, ang_sep, _ = self.matched_catalog_skycoords.match_to_catalog_sky(
-    #         stars_skycoords)
-
-    #     matched_stars_delta_x = self.matched_stars_xy['xcentroid'] - self.c_x
-    #     matched_stars_delta_y = self.matched_stars_xy['ycentroid'] - self.c_y
-    #     matched_stars_delta_xy = np.asarray(
-    #         [matched_stars_delta_x, matched_stars_delta_y])
-    #     matched_stars_delta_xy = np.dot(
-    #         [[1, 0], [0, -1]], matched_stars_delta_xy)
-    #     matched_stars_delta_xy = rot(
-    #         matched_stars_delta_xy, -self.roll-np.pi/2)
-    #     catalog_x, catalog_y, catalog_theta, catalog_pa = self.eq_to_xy(
-    #         self.ra*u.rad, self.dec*u.rad, self.matched_catalog_skycoords.ra, self.matched_catalog_skycoords.dec)
-    #     xy_sep = np.sqrt(
-    #         (matched_stars_delta_xy[0]-catalog_x)**2+(matched_stars_delta_xy[1]-catalog_y)**2)
-
-    #     theta_rs = matched_stars_theta-catalog_theta
-    #     pa_rs = matched_stars_pa-catalog_pa
-
-    #     # catalog_theta = angular_separation(
-    #     #     parameters[0]*u.rad, parameters[1]*u.rad, self.matched_catalog_stars['RA'], self.matched_catalog_stars['DEC']).to(u.deg)
-    #     fig, axs = plt.subplots(2, 2, dpi=dpi)
-    #     for ax in axs.flatten():
-    #         ax.set_xlabel('theta to center [deg]')
-    #         ax.set_xlim(0, 90)
-
-    #     axs[0, 0].scatter(catalog_theta.to(u.deg),
-    #                       ang_sep.to(u.arcmin), **kwargs)
-    #     axs[0, 0].set_ylabel('angular sepration [arcmin]')
-    #     axs[0, 1].scatter(catalog_theta.to(u.deg), xy_sep, **kwargs)
-    #     axs[0, 1].set_ylabel('xy sepration [pixel]')
-    #     axs[1, 0].scatter(catalog_theta.to(u.deg), theta_rs, **kwargs)
-    #     axs[1, 0].set_ylabel('theta res [arcmin]')
-    #     axs[1, 1].scatter(catalog_theta.to(u.deg), pa_rs, **kwargs)
-    #     axs[1, 1].set_ylabel('position angle res [arcmin]')
-    #     axs[0, 0].set_ylim(0, 30)
-    #     axs[0, 1].set_ylim(0, 20)
-    #     axs[1, 0].set_ylim(-25, 25)
-    #     axs[1, 1].set_ylim(-30, 30)
-
-    #     plt.tight_layout()
-    #     plt.show()
-
     def lens_optimize(self, az_alt_range=3, roll_range=4, f_range=1, k_range=0.2):
         az_alt_range = az_alt_range/180*np.pi
         roll_range = roll_range/180*np.pi
 
-        def star_rms(parameters):
+        def star_rms(x):
             """
             x = [az,alt,roll,f,k]
             """
-            stars_az, stars_alt, theta, pa = self.xy_to_az(c_az=parameters[0], c_alt=parameters[1],
-                                                           x=self.matched_stars_xy[
-                'xcentroid'], y=self.matched_stars_xy['ycentroid'],
+            stars_az, stars_alt, _, _ = self.xy_to_az(
+                c_az=x[0], c_alt=x[1],
+                x=self.matched_stars_xy['xcentroid'], 
+                y=self.matched_stars_xy['ycentroid'],
                 c_x=self.c_x, c_y=self.c_y,
-                roll=parameters[2], f=parameters[3], k=parameters[4])
+                roll=x[2], f=x[3], k=x[4],ks=self.ks)
             stars_skycoords = SkyCoord(
                 az=stars_az, alt=stars_alt, frame=self.az_frame)
             _, ang_sep, _ = self.matched_catalog_skycoords.match_to_catalog_sky(
@@ -367,59 +304,55 @@ class FishEyeImage():
                             roll_range, f_range, k_range])
         bonds = np.vstack([init-ranges/2, init+ranges/2]).T
         result = minimize(fun=star_rms, x0=init, bounds=bonds)
-        # parameters = result.x
-        # self.draw_residual(parameters)
         return init, result
 
-    def plate_optimize(self, ra_dec_range=8, roll_range=8, c_xy_range=200):
-        ra_dec_range = ra_dec_range/180*np.pi
+    def plate_optimize(self, az_alt_range=8, roll_range=8, c_xy_range=200):
+        az_alt_range = az_alt_range/180*np.pi
         roll_range = roll_range/180*np.pi
 
-        def star_rms(parameters):
+        def star_rms(x):
             """
-            parameters = [ra,dec,roll]
+            x = [az,alt,roll,cx,cy]
             """
-            stars_ra, stars_dec, theta, pa = self.xy_to_eq(
-                self.matched_stars_xy['xcentroid'], self.matched_stars_xy['ycentroid'],
-                c_ra=parameters[0], c_dec=parameters[1], roll=parameters[2],
-                f=self.f, k=self.k,
-                c_x=parameters[3], c_y=parameters[4])
+            stars_az, stars_alt, _, _ = self.xy_to_az(
+                c_az=x[0], c_alt=x[1],
+                x=self.matched_stars_xy['xcentroid'], 
+                y=self.matched_stars_xy['ycentroid'],
+                c_x=x[3], c_y=x[4],
+                roll=x[2], f=self.f, k=self.k,ks=self.ks)
             stars_skycoords = SkyCoord(
-                ra=stars_ra, dec=stars_dec, frame='icrs')
-            idx, d2d, d3d = self.matched_catalog_skycoords.match_to_catalog_sky(
+                az=stars_az, alt=stars_alt, frame=self.az_frame)
+            _, ang_sep, _ = self.matched_catalog_skycoords.match_to_catalog_sky(
                 stars_skycoords)
-            d2d = d2d.to(u.arcmin).value
-            return np.sqrt(np.mean(d2d**2))
+            ang_sep = ang_sep.to(u.arcmin).value
+            return np.sqrt(np.mean(ang_sep**2))
+        init = np.asarray([self.az, self.alt, self.az_roll, self.c_x, self.c_y])
+        ranges = np.asarray([az_alt_range, az_alt_range,
+                            roll_range, c_xy_range, c_xy_range])
+        bonds = np.vstack([init-ranges/2, init+ranges/2]).T
+        result = minimize(fun=star_rms, x0=init, bounds=bonds)
 
-        result = minimize(fun=star_rms, x0=np.asarray([self.ra, self.dec, self.roll, self.c_x, self.c_y]), bounds=(
-            (self.ra-ra_dec_range/2, self.ra+ra_dec_range/2),
-            (self.dec-ra_dec_range/2, self.dec+ra_dec_range/2),
-            (self.roll-roll_range/2, self.roll+roll_range/2),
-            (self.c_x-c_xy_range/2, self.c_x+c_xy_range/2),
-            (self.c_y-c_xy_range/2, self.c_y+c_xy_range/2))
-        )
+        return init, result
 
-        return [self.ra, self.dec, self.roll], result
+    def distort_optimize(self):
+        catalog_theta = angular_separation(
+            self.az*u.rad, self.alt*u.rad, self.matched_catalog_skycoords.az, self.matched_catalog_skycoords.alt)
+        x = self.matched_stars_xy['xcentroid']
+        y = self.matched_stars_xy['ycentroid']
+        _, _, matched_stars_theta, _ = self.xy_to_az(c_az=self.az,c_alt=self.alt,
+            x=x, y=y,  roll=self.az_roll, f=self.f, k=self.k, c_x=self.c_x, c_y=self.c_y, ks=self.ks)
+        delta_x = x - self.c_x
+        delta_y = y - self.c_y
+        delta_xy = np.asarray([delta_x, delta_y])
+        delta_xy = np.dot([[1, 0], [0, -1]], delta_xy)
+        r = np.sqrt(delta_x**2+delta_y**2)*self.pixel_size
 
-    # def distort_optimize(self):
-    #     catalog_theta = angular_separation(
-    #         self.ra*u.rad, self.dec*u.rad, self.matched_catalog_skycoords.ra, self.matched_catalog_skycoords.dec)
-    #     x = self.matched_stars_xy['xcentroid']
-    #     y = self.matched_stars_xy['ycentroid']
-    #     _, _, matched_stars_theta, _ = self.xy_to_eq(
-    #         self.matched_stars_xy['xcentroid'], self.matched_stars_xy['ycentroid'], c_ra=self.ra, c_dec=self.dec, roll=self.roll, f=self.f, k=self.k, c_x=self.c_x, c_y=self.c_y)
-    #     delta_x = x - self.c_x
-    #     delta_y = y - self.c_y
-    #     delta_xy = np.asarray([delta_x, delta_y])
-    #     delta_xy = np.dot([[1, 0], [0, -1]], delta_xy)
-    #     r = np.sqrt(delta_x**2+delta_y**2)*self.pixel_size
-
-    #     def func(r, a, b, c, d, e):
-    #         return a*r**5+b*r**4+c*r**3+d*r**2+e*r
-    #     [self.a, self.b, self.c, self.d, self.e], _ = curve_fit(
-    #         func, r, (matched_stars_theta-catalog_theta).to(u.rad))
-
-    #     return self.a, self.b, self.c, self.d, self.e
+        def func(r, a, b, c, d, e):
+            return a*r**5+b*r**4+c*r**3+d*r**2+e*r
+        [a, b, c, d, e], _ = curve_fit(
+            func, r, (matched_stars_theta-catalog_theta).to(u.rad))
+        self.ks = [a, b, c, d, e]
+        return self.ks
 
     def constellation(self, fn='test.jpg', cons_file_path='conslines.npy'):
         cons_lines = np.load(cons_file_path)
