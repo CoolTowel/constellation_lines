@@ -4,18 +4,27 @@ from PIL import Image, ImageDraw
 from astropy.io import fits
 from astropy.table import Table, vstack
 from matplotlib.collections import LineCollection
-from astropy.coordinates import angular_separation, position_angle, offset_by, SkyCoord
+from astropy.coordinates import SkyCoord, EarthLocation, AltAz, angular_separation, position_angle, offset_by, ICRS
 # from photutils.aperture import CircularAperture
 from astropy.stats import sigma_clipped_stats
 # from photutils.detection import find_peaks
-import tetra3
 import rawpy
 import exiftool
 from photutils.detection import find_peaks, DAOStarFinder
 import astropy.units as u
 from scipy.optimize import minimize, curve_fit
+from astropy.time import Time
+import json
 
-t3 = tetra3.Tetra3()
+def rad_convertor(rad):
+    return np.arctan2(np.sin(rad),np.cos(rad))
+
+
+def alt2pres(altitude):
+    # https://pvlib-python.readthedocs.io/en/stable/_modules/pvlib/atmosphere.html
+    press = 100 * ((44331.514 - altitude) / 11880.516) ** (1 / 0.1902632)
+
+    return press/100*u.hPa
 
 
 def rot(vectors, deg):
@@ -36,26 +45,38 @@ def x_y(ra1, dec1, ra2, dec2, lens_func, pixel_size=0.006):
 
 
 class FishEyeImage():
-    def __init__(self, img_path, raw_path, raw_iso_corr=False, 
-                 f=14.6, k=-0.19, pixel_size=0.006, sensor='full_frame', star_catalog='HIP2_rad.fits', mag_limit=6.5):
-        self.k = k
-        self.f = f
+    def __init__(self, raw_path, loc, results_path='./results/', az_mode=True, raw_iso_corr=False,
+                 f=14.6, k=-0.19, pixel_size=0.006, sensor='full_frame',
+                 star_catalog='HIP2_rad.fits', mag_limit=6.5):
+        self.results_path = results_path
+        self.loc = loc
+        self.az_mode = az_mode
+        self.raw_path = raw_path
         with rawpy.imread(raw_path) as rawfile:
             raw = rawfile.postprocess(
                 gamma=(1, 1), no_auto_bright=True, output_bps=16)[16:4016, 20:6020]
-        self.img = Image.open(img_path)
-        with exiftool.ExifToolHelper() as et:
-            self.iso = et.get_metadata(raw_path)[0]['EXIF:ISO']
 
+        with exiftool.ExifToolHelper() as et:
+            exif = et.get_metadata(raw_path)[0]
+            time = exif['EXIF:DateTimeOriginal']
+            offset = exif['EXIF:OffsetTime']
+        time = time.replace(':', '-', 2)
+        self.obstime = Time(time)-int(offset[0:3])*u.hour
         self.raw = np.mean(np.asarray(raw), axis=-1)
+
+        self.height = self.raw.shape[0]
+        self.width = self.raw.shape[1]
+
+        # if cutout:
+        #     ii = (self.height-cutout)//2
+        #     jj = (self.width-cutout)//2
+        #     self.raw = self.raw[ii:ii+cutout, jj:jj+cutout]
+        #     self.height = self.raw.shape[0]
+        #     self.width = self.raw.shape[1]
+
         if raw_iso_corr:
             self.raw[self.raw < 60000] = self.raw[self.raw <
                                                   60000]//(self.iso/1600)
-        # self.raw = np.array(raw)
-        self.height = self.raw.shape[0]
-        self.width = self.raw.shape[1]
-        self.c_x = self.raw.shape[1]/2
-        self.c_y = self.raw.shape[0]/2
         if pixel_size is not None:
             self.pixel_size = pixel_size
         else:
@@ -65,191 +86,204 @@ class FishEyeImage():
                 self.pixel_size = 24/self.height/1.55
 
         self.catalog = Table.read(star_catalog)
-        self.catalog = self.catalog[np.logical_and(
-            self.catalog['Hpmag'] < mag_limit, self.catalog['Hpmag'] > 1)]
+        self.catalog = self.catalog[
+            (self.catalog['Hpmag'] < mag_limit) & (self.catalog['Hpmag'] > 1)]
+        self.catalog_skycoords = SkyCoord(
+            ra=self.catalog['RA'], dec=self.catalog['DEC'], frame='icrs', unit='rad')
+        if not az_mode:
+            self.frame = ICRS
+        elif az_mode:
+            self.frame = AltAz(obstime=self.obstime, location=self.loc, pressure=alt2pres(
+                self.loc.height.value), temperature=0*u.deg_C, relative_humidity=0.5, obswl=550*u.nm)
+            self.catalog_skycoords = self.catalog_skycoords.transform_to(
+                self.frame)
+        self.lens_para = {'f': f, 'k': k, 'ks': np.zeros(4)}
+        self.plat_para = {
+            'lon': 0,
+            'lat': 0,
+            'roll': 0,
+            'cu': self.raw.shape[1]/2,
+            'cv': self.raw.shape[0]/2}
 
-    def eq_to_xy(self, ra1, dec1, ra2, dec2, lens_func=None, pixel_size=None):
-        if lens_func is None:
-            lens_func = self.lens_func
-        if pixel_size is None:
-            pixel_size = self.pixel_size
-        ang_sep = angular_separation(
-            ra1, dec1, ra2, dec2)
-        pa = position_angle(
-            ra1, dec1, ra2, dec2)
-        r = lens_func(ang_sep)/pixel_size
-        x = r * np.cos(pa)
-        y = r * np.sin(pa)
-        return x, y, ang_sep.to(u.arcmin), pa.to(u.arcmin)
+    def solve(self, solve_size=800):
+        try:
+            f = open(self.results_path+self.raw_path+'.solution', "r")
+            self.solution = json.loads(f.read())
+            f.close()
+        except:
+            print('using t3')
+            import tetra3
+            t3 = tetra3.Tetra3()
+            ii = (self.height-solve_size)//2
+            jj = (self.width-solve_size)//2
+            data = self.raw[ii:ii+solve_size, jj:jj+solve_size]
+            data4t3 = data.astype(np.uint16)
+            data4t3[data4t3 <= 0] = 0
+            img4t3 = Image.fromarray(data4t3)
+            t3_solution = t3.solve_from_image(img4t3, distortion=-0.0085542)
+            ra = float(t3_solution['RA']/180*np.pi)
+            dec = float(t3_solution['Dec']/180*np.pi)
+            eq_roll = float(t3_solution['Roll']/180*np.pi)
+            self.solution = {'ra': ra, 'dec': dec, 'eq_roll': eq_roll}
+            f = open(self.results_path+self.raw_path+'.solution', "w")
+            f.write(json.dumps(self.solution))
+            f.close()
 
-    def lens_func(self, theta, f=None, k=None):  # see https://ptgui.com/support.html#3_28
-        if k == None or f == None:
-            if self.k >= -1 and self.k < 0:
-                r = self.f*np.sin(self.k*theta)/self.k
-            elif self.k == 0:
-                r = self.f*theta
-            elif self.k > 0 and self.k <= 1:
-                r = self.f*np.tan(self.k*theta)/self.k
-        else:
-            if k >= -1 and k < 0:
-                r = f*np.sin(k*theta)/k
-            elif k == 0:
-                r = f*theta
-            elif k > 0 and k <= 1:
-                r = f*np.tan(k*theta)/k
+        print(self.solution)
+        if not self.az_mode:
+            self.plat_para['lon'] = self.solution['ra']
+            self.plat_para['lat'] = self.solution['dec']
+            self.plat_para['roll'] = self.solution['eq_roll']
+        elif self.az_mode:
+            center_eq = SkyCoord(ra=self.solution['ra'],
+                                 dec=self.solution['dec'],
+                                 frame='icrs', unit='rad')
+            center_az = center_eq.transform_to(self.frame)
+            self.plat_para['lon'] = center_az.az.to('rad').value
+            self.plat_para['lat'] = center_az.alt.to('rad').value
+            eq_of_north = SkyCoord(ra=0, dec=90, frame='icrs', unit='deg')
+            az_of_north = eq_of_north.transform_to(self.frame)
+            c = position_angle(center_az.az, center_az.alt,
+                               az_of_north.az, az_of_north.alt)
+            self.plat_para['roll'] = self.solution['eq_roll']+c.to('rad').value
+            # 地平坐标经度自东向西增加，与天球坐标相反，故az坐标下计得所有pa需加负号处理。因此负负得正，此处为相加
+
+    def initial_xmatch(self, sub_region_size=500, sigma=15, sep_limit=30):
+        try:
+            self.stars_uv = Table.read(self.results_path+self.raw_path+'.stars_uv'+'_'+str(
+                sub_region_size)+'_size_'+str(sigma)+'_sigma.fits')
+        except FileNotFoundError:
+            self.stars_uv = Table()
+            for i in range(self.height//sub_region_size):
+                for j in range(self.width//sub_region_size):
+                    data = self.raw[i*sub_region_size:(
+                        i+1)*sub_region_size, j*sub_region_size:(j+1)*sub_region_size]
+                    mean, median, std = sigma_clipped_stats(data, sigma=3.0)
+                    threshold = median + (sigma * std)
+                    stars_founder = DAOStarFinder(fwhm=5, threshold=threshold)
+                    stars_found = stars_founder(data)
+                    if stars_found is not None:
+                        stars_found['xcentroid'] += j*sub_region_size
+                        stars_found['ycentroid'] += i*sub_region_size
+                        self.stars_uv = vstack([self.stars_uv, stars_found])
+            self.stars_uv.write(self.results_path+self.raw_path+'.stars_uv'+'_'+str(
+                sub_region_size)+'_size_'+str(sigma)+'_sigma.fits', format='fits')
+
+        im_u = self.stars_uv['xcentroid']
+        im_v = self.stars_uv['ycentroid']
+        x, y = self.uv2xy(im_u, im_v)
+        star_lon, star_lat, _, _ = self.xy2wcs(x, y)
+
+        detect_star_skycoords = SkyCoord(star_lon, star_lat, frame=self.frame)
+
+        idx, sep, _ = self.catalog_skycoords.match_to_catalog_sky(
+            detect_star_skycoords)
+        sep_constraint = sep < sep_limit*u.arcmin
+        self.catalog_skycoords = self.catalog_skycoords[sep_constraint]
+        matched_idx = idx[sep_constraint]
+        self.star_skycoords = detect_star_skycoords[matched_idx]
+        self.stars_uv = np.asarray(
+            [self.stars_uv['xcentroid'][matched_idx], self.stars_uv['ycentroid'][matched_idx]])
+        return np.sqrt(np.mean((sep[sep_constraint].to(u.arcmin))**2))
+
+    def lens_func(self, theta, lens_para=None):  # see https://ptgui.com/support.html#3_28
+        if lens_para == None:
+            lens_para = self.lens_para
+        f = lens_para['f']
+        k = lens_para['k']
+        ks = lens_para['ks']
+        r = f*np.sin(k*theta)/k
         return r
 
-    def reverse_lens_func(self, r, f=None, k=None):
-        if k == None or f == None:
-            if self.k >= -1 and self.k < 0:
-                theta = np.arcsin(self.k/self.f*r)/self.k
-        else:
-            if k >= -1 and k < 0:
-                theta = np.arcsin(k/f*r)/k
-        return theta
+    def reverse_lens_func(self, r, lens_para=None):
+        if lens_para == None:
+            lens_para = self.lens_para
 
-    def reverse_lens_func_distrot(self, r):
-        theta = self.reverse_lens_func(r)
-        theta -= (self.a*r**5 + self.b*r**4 +
-                         self.c*r**3 + self.d*r**2 + self.e*r)
-        return theta
+        f = lens_para['f']
+        k = lens_para['k']
+        ks = lens_para['ks']
+        theta = np.arcsin(r*k/f)/k
+        return theta-theta*(ks[0]*theta+ks[1]*theta**3+ks[2]*theta**5+ks[3]*theta**7)
 
-    def solve(self, solve_size=400):
-        ii = (self.height-solve_size)//2
-        jj = (self.width-solve_size)//2
-
-        data = self.raw[ii:ii+solve_size, jj:jj+solve_size]
-
-        data4t3 = data.astype(np.uint16)
-        data4t3[data4t3 <= 0] = 0
-        img4t3 = Image.fromarray(data4t3)
-        self.solution = t3.solve_from_image(img4t3, distortion=-0.0085542)
-        print(self.solution)
-        self.ra = self.solution['RA']/180*np.pi
-        self.dec = self.solution['Dec']/180*np.pi
-        self.roll = self.solution['Roll']/180*np.pi
-        return self.solution
-
-    def rot_shift(self, xy, image_to_show):
-        xy = rot(rot(xy, np.pi/2), self.roll)
+    def uv2xy(self, im_u, im_v, plat_para=None):
+        if plat_para == None:
+            plat_para = self.plat_para
+        roll = plat_para['roll']
+        cu = plat_para['cu']
+        cv = plat_para['cv']
+        x = im_u - cu
+        y = im_v - cv
+        xy = np.asarray([x, y])
         xy = np.dot([[1, 0], [0, -1]], xy)
-        xy[0] += (image_to_show.shape[1]/2)
-        xy[1] += (image_to_show.shape[0]/2)
-        return xy
+        xy = rot(xy, -roll - np.pi/2)
+        return xy[0], xy[1]
 
-    def detect_stars(self, res=500):
-        self.stars_xy = Table()
-        for i in range(self.height//res):
-            for j in range(self.width//res):
-                data = self.raw[i*res:(i+1)*res, j*res:(j+1)*res]
-                mean, median, std = sigma_clipped_stats(data, sigma=3.0)
-                threshold = median + (20 * std)
-                # stars_found = find_peaks(data, threshold, box_size=11)
-                stars_founder = DAOStarFinder(fwhm=5, threshold=threshold)
-                stars_found = stars_founder(data)
-                if stars_found is not None:
-                    # stars_found['x_peak'] += j*res
-                    # stars_found['y_peak'] += i*res
-                    stars_found['xcentroid'] += j*res
-                    stars_found['ycentroid'] += i*res
-                    self.stars_xy = vstack([self.stars_xy, stars_found])
-        # stars_eq.add_column(stars_xy['peak_value'], name='peak_value')
-        return self.stars_xy
+    def xy2uv(self, x, y, plat_para=None):
+        if plat_para == None:
+            plat_para = self.plat_para
+        roll = plat_para['roll']
+        cu = plat_para['cu']
+        cv = plat_para['cv']
+        xy = np.asarray([x, y])
+        xy = rot(xy, roll + np.pi/2)
+        xy = np.dot([[1, 0], [0, -1]], xy)
+        im_u = xy[0] + cu
+        im_v = xy[1] + cv
+        return im_u, im_v
 
-    def xy_to_eq(self, x, y, c_ra, c_dec, roll, f, k, c_x=None, c_y=None):
-        if c_x == None or c_y == None:
-            c_x = self.c_x
-            c_y = self.c_y
-        delta_x = x - c_x
-        delta_y = y - c_y
-        delta_xy = np.asarray([delta_x, delta_y])
-        delta_xy = np.dot([[1, 0], [0, -1]], delta_xy)
-        delta_xy = rot(delta_xy, -roll-np.pi/2)
-        r = np.sqrt(delta_x**2+delta_y**2)*self.pixel_size
-        pa = np.arctan2(delta_xy[1], delta_xy[0])
-        pa[pa < 0] += 2*np.pi
-        theta = self.reverse_lens_func(r, f, k)
-        ra, dec = offset_by(c_ra, c_dec, pa, theta)
-        return ra, dec, (theta*u.rad).to(u.arcmin), (pa*u.rad).to(u.arcmin)
+    def xy2wcs(self, x, y, plat_para=None, lens_para=None):
+        if plat_para == None:
+            plat_para = self.plat_para
+        r = np.sqrt(x**2+y**2)*self.pixel_size
+        pa = np.arctan2(y,x)
+        theta = self.reverse_lens_func(r=r, lens_para=lens_para)
+        if self.az_mode:
+            lon, lat = offset_by(
+                plat_para['lon'], plat_para['lat'], -pa, theta)
+        else:
+            lon, lat = offset_by(plat_para['lon'], plat_para['lat'], pa, theta)
+        return lon, lat, theta*u.rad, pa*u.rad
 
-    def xy_to_eq_distort(self, x, y):
-        delta_x = x - self.c_x
-        delta_y = y - self.c_y
-        delta_xy = np.asarray([delta_x, delta_y])
-        delta_xy = np.dot([[1, 0], [0, -1]], delta_xy)
-        delta_xy = rot(delta_xy, -self.roll-np.pi/2)
-        r = np.sqrt(delta_x**2+delta_y**2)*self.pixel_size
-        pa = np.arctan2(delta_xy[1], delta_xy[0])
-        pa[pa < 0] += 2*np.pi
-        theta = self.reverse_lens_func_distrot(r)
-        ra, dec = offset_by(self.ra, self.dec, pa, theta)
-        return ra, dec, (theta*u.rad).to(u.arcmin), (pa*u.rad).to(u.arcmin)
-
-    def detect_stars_eq(self):
-        self.detect_stars()
-        ra, dec, theta, pa = self.xy_to_eq(
-            self.stars_xy['xcentroid'], self.stars_xy['ycentroid'], self.ra, self.dec, self.roll, self.f, self.k)
-        self.stars_eq_init = Table()
-        self.stars_eq_init.add_columns([ra, dec], names=['RAdeg', 'DECdeg'])
-        return self.stars_xy, self.stars_eq_init
-
-    def first_match(self, bin_size=75):
-        self.detect_stars_eq()
-        detect_star_skycoords = SkyCoord(
-            ra=self.stars_eq_init['RAdeg'], dec=self.stars_eq_init['DECdeg'], frame='icrs')
-        catalog_skycoords = SkyCoord(
-            ra=self.catalog['RA'], dec=self.catalog['DEC'], frame='icrs', unit='rad')
-        idx, d2d, _ = catalog_skycoords.match_to_catalog_sky(
-            detect_star_skycoords)
-        self.matched_catalog_stars = self.catalog[np.where(
-            d2d.to(u.arcmin) < 20*u.arcmin)[0]]
-        self.matched_star_idx = idx[np.where(
-            d2d.to(u.arcmin) < 20*u.arcmin)[0]]
-        self.matched_stars_xy = self.stars_xy[self.matched_star_idx]
-        self.matched_catalog_skycoords = SkyCoord(
-            ra=self.matched_catalog_stars['RA'], dec=self.matched_catalog_stars['DEC'], frame='icrs', unit='rad')
-        _, _, catalog_theta, _ = self.eq_to_xy(
-            self.ra*u.rad, self.dec*u.rad, self.matched_catalog_skycoords.ra, self.matched_catalog_skycoords.dec)
-        catalog_theta = catalog_theta.to(u.deg)
-        uniform_ids = np.asarray([])
-        for i in range(6):
-            theta_min = i*15*u.deg
-            theta_max = (1+i)*15*u.deg
-            ids = np.where((catalog_theta >= theta_min) &
-                           (catalog_theta < theta_max))[0]
-            if len(ids) > bin_size:
-                uniform_ids = np.append(
-                    uniform_ids, np.random.choice(ids, 75, replace=False))
-            else:
-                uniform_ids = np.append(uniform_ids, ids)
-        uniform_ids = uniform_ids.astype(int)
-        self.matched_catalog_skycoords = self.matched_catalog_skycoords[uniform_ids]
-        self.matched_stars_xy = self.matched_stars_xy[uniform_ids]
-        return idx, d2d
+    def wcs2xy(self, lon, lat, plat_para=None, lens_para=None):
+        if plat_para == None:
+            plat_para = self.plat_para
+        theta = angular_separation(
+            plat_para['lon']*u.rad, plat_para['lat']*u.rad, lon, lat)
+        pa = position_angle(plat_para['lon']*u.rad,
+                            plat_para['lat']*u.rad, lon, lat)
+        pa = rad_convertor(pa)
+        r = self.lens_func(theta.to(u.rad).value, lens_para)
+        r_pixel = r/self.pixel_size
+        if self.az_mode:
+            pa = -pa
+            x = r_pixel * np.cos(pa)
+            y = r_pixel * np.sin(pa)
+        else:
+            x = r_pixel * np.cos(pa)
+            y = r_pixel * np.sin(pa)
+        return x, y, theta, pa
 
     def draw_residual(self, dpi, **kwargs):
-        stars_ra, stars_dec, matched_stars_theta, matched_stars_pa = self.xy_to_eq(
-            self.matched_stars_xy['xcentroid'], self.matched_stars_xy['ycentroid'], c_ra=self.ra, c_dec=self.dec, roll=self.roll, f=self.f, k=self.k)
-        stars_skycoords = SkyCoord(
-            ra=stars_ra, dec=stars_dec, frame='icrs')
-        _, ang_sep, _ = self.matched_catalog_skycoords.match_to_catalog_sky(
+        im_u = self.stars_uv[0]
+        im_v = self.stars_uv[1]
+        star_x, star_y = self.uv2xy(im_u, im_v)
+        lon, lat, star_theta, star_pa = self.xy2wcs(star_x, star_y)
+        stars_skycoords = SkyCoord(lon, lat, frame=self.frame)
+        _, ang_sep, _ = self.catalog_skycoords.match_to_catalog_sky(
             stars_skycoords)
+        if self.az_mode:
+            catalog_lon = self.catalog_skycoords.az
+            catalog_lat = self.catalog_skycoords.alt
+        else:
+            catalog_lon = self.catalog_skycoords.ra
+            catalog_lat = self.catalog_skycoords.dec
 
-        matched_stars_delta_x = self.matched_stars_xy['xcentroid'] - self.c_x
-        matched_stars_delta_y = self.matched_stars_xy['ycentroid'] - self.c_y
-        matched_stars_delta_xy = np.asarray(
-            [matched_stars_delta_x, matched_stars_delta_y])
-        matched_stars_delta_xy = np.dot(
-            [[1, 0], [0, -1]], matched_stars_delta_xy)
-        matched_stars_delta_xy = rot(
-            matched_stars_delta_xy, -self.roll-np.pi/2)
-        catalog_x, catalog_y, catalog_theta, catalog_pa = self.eq_to_xy(
-            self.ra*u.rad, self.dec*u.rad, self.matched_catalog_skycoords.ra, self.matched_catalog_skycoords.dec)
-        xy_sep = np.sqrt(
-            (matched_stars_delta_xy[0]-catalog_x)**2+(matched_stars_delta_xy[1]-catalog_y)**2)
+        catalog_x, catalog_y, catalog_theta, catalog_pa = self.wcs2xy(
+            catalog_lon, catalog_lat)
+        xy_sep = np.sqrt((star_x-catalog_x)**2+(star_y-catalog_y)**2)
 
-        theta_rs = matched_stars_theta-catalog_theta
-        pa_rs = matched_stars_pa-catalog_pa
+        theta_rs = star_theta-catalog_theta
+        pa_rs = star_pa-catalog_pa
 
         # catalog_theta = angular_separation(
         #     parameters[0]*u.rad, parameters[1]*u.rad, self.matched_catalog_stars['RA'], self.matched_catalog_stars['DEC']).to(u.deg)
@@ -260,12 +294,17 @@ class FishEyeImage():
 
         axs[0, 0].scatter(catalog_theta.to(u.deg),
                           ang_sep.to(u.arcmin), **kwargs)
+        axs[0, 0].set_title('RMS={:.2f}'.format(np.sqrt(np.mean((ang_sep.to(u.arcmin))**2))))
         axs[0, 0].set_ylabel('angular sepration [arcmin]')
-        axs[0, 1].scatter(catalog_theta.to(u.deg), xy_sep, **kwargs)
-        axs[0, 1].set_ylabel('xy sepration [pixel]')
-        axs[1, 0].scatter(catalog_theta.to(u.deg), theta_rs, **kwargs)
+        axs[0, 1].scatter(catalog_pa.to(u.deg), pa_rs.to(u.arcmin), **kwargs)
+        axs[0, 1].set_xlabel('potision angle [deg]')
+        axs[0, 1].set_ylabel('position angle res [arcmin]')
+        axs[0, 1].set_xlim(-180, 180)
+        axs[1, 0].scatter(catalog_theta.to(u.deg),
+                          theta_rs.to(u.arcmin), **kwargs)
         axs[1, 0].set_ylabel('theta res [arcmin]')
-        axs[1, 1].scatter(catalog_theta.to(u.deg), pa_rs, **kwargs)
+        axs[1, 1].scatter(catalog_theta.to(u.deg),
+                          pa_rs.to(u.arcmin), **kwargs)
         axs[1, 1].set_ylabel('position angle res [arcmin]')
         axs[0, 0].set_ylim(0, 30)
         axs[0, 1].set_ylim(0, 20)
@@ -275,131 +314,69 @@ class FishEyeImage():
         plt.tight_layout()
         plt.show()
 
-    def draw_residual_dis(self, dpi, **kwargs):
-        stars_ra, stars_dec, matched_stars_theta, matched_stars_pa = self.xy_to_eq_distort(
-            self.matched_stars_xy['xcentroid'], self.matched_stars_xy['ycentroid'])
-        stars_skycoords = SkyCoord(
-            ra=stars_ra, dec=stars_dec, frame='icrs')
-        _, ang_sep, _ = self.matched_catalog_skycoords.match_to_catalog_sky(
-            stars_skycoords)
-
-        matched_stars_delta_x = self.matched_stars_xy['xcentroid'] - self.c_x
-        matched_stars_delta_y = self.matched_stars_xy['ycentroid'] - self.c_y
-        matched_stars_delta_xy = np.asarray(
-            [matched_stars_delta_x, matched_stars_delta_y])
-        matched_stars_delta_xy = np.dot(
-            [[1, 0], [0, -1]], matched_stars_delta_xy)
-        matched_stars_delta_xy = rot(
-            matched_stars_delta_xy, -self.roll-np.pi/2)
-        catalog_x, catalog_y, catalog_theta, catalog_pa = self.eq_to_xy(
-            self.ra*u.rad, self.dec*u.rad, self.matched_catalog_skycoords.ra, self.matched_catalog_skycoords.dec)
-        xy_sep = np.sqrt(
-            (matched_stars_delta_xy[0]-catalog_x)**2+(matched_stars_delta_xy[1]-catalog_y)**2)
-
-        theta_rs = matched_stars_theta-catalog_theta
-        pa_rs = matched_stars_pa-catalog_pa
-
-        # catalog_theta = angular_separation(
-        #     parameters[0]*u.rad, parameters[1]*u.rad, self.matched_catalog_stars['RA'], self.matched_catalog_stars['DEC']).to(u.deg)
-        fig, axs = plt.subplots(2, 2, dpi=dpi)
-        for ax in axs.flatten():
-            ax.set_xlabel('theta to center [deg]')
-            ax.set_xlim(0, 90)
-
-        axs[0, 0].scatter(catalog_theta.to(u.deg),
-                          ang_sep.to(u.arcmin), **kwargs)
-        axs[0, 0].set_ylabel('angular sepration [arcmin]')
-        axs[0, 1].scatter(catalog_theta.to(u.deg), xy_sep, **kwargs)
-        axs[0, 1].set_ylabel('xy sepration [pixel]')
-        axs[1, 0].scatter(catalog_theta.to(u.deg), theta_rs, **kwargs)
-        axs[1, 0].set_ylabel('theta res [arcmin]')
-        axs[1, 1].scatter(catalog_theta.to(u.deg), pa_rs, **kwargs)
-        axs[1, 1].set_ylabel('position angle res [arcmin]')
-        axs[0, 0].set_ylim(0, 30)
-        axs[0, 1].set_ylim(0, 20)
-        axs[1, 0].set_ylim(-25, 25)
-        axs[1, 1].set_ylim(-30, 30)
-
-        plt.tight_layout()
-        plt.show()
-
-    def lens_optimize(self, ra_dec_range=3, roll_range=4, f_range=1, k_range=0.2):
-        ra_dec_range = ra_dec_range/180*np.pi
-        roll_range = roll_range/180*np.pi
-
-        def star_rms(parameters):
+    def optimize(self, angle_range=5, f_range=1, k_range=0.2, uv_range=200):
+        angle_range = angle_range/180*np.pi
+        def rms1(x):
             """
-            x = [ra,dec,roll,f,k]
+            x = [lon,lat,roll,cu,cv,f,k]
             """
-            stars_ra, stars_dec, theta, pa = self.xy_to_eq(
-                self.matched_stars_xy['xcentroid'], self.matched_stars_xy['ycentroid'], c_ra=parameters[0], c_dec=parameters[1], roll=parameters[2], f=parameters[3], k=parameters[4])
-            stars_skycoords = SkyCoord(
-                ra=stars_ra, dec=stars_dec, frame='icrs')
-            _, ang_sep, _ = self.matched_catalog_skycoords.match_to_catalog_sky(
+            plat_para = {
+                'lon': x[0],
+                'lat': x[1],
+                'roll': x[2],
+                'cu': x[3],
+                'cv': x[4]}
+            lens_para = {
+            'f': x[5],
+            'k': x[6],
+            'ks':self.lens_para['ks']}
+            im_u = self.stars_uv[0]
+            im_v = self.stars_uv[1]
+            x, y = self.uv2xy(im_u, im_v, plat_para=plat_para)
+            lon, lat, _, _ = self.xy2wcs(x, y, plat_para=plat_para, lens_para= lens_para)
+            stars_skycoords = SkyCoord(lon, lat, frame=self.frame)
+            _, ang_sep, _ = self.catalog_skycoords.match_to_catalog_sky(
                 stars_skycoords)
             ang_sep = ang_sep.to(u.arcmin).value
             return np.sqrt(np.mean(ang_sep**2))
-        result = minimize(fun=star_rms, x0=np.asarray([self.ra, self.dec, self.roll, self.f, self.k]), bounds=(
-            (self.ra-ra_dec_range/2, self.ra+ra_dec_range/2),
-            (self.dec-ra_dec_range/2, self.dec+ra_dec_range/2),
-            (self.roll-roll_range/2, self.roll+roll_range/2),
-            (self.f-f_range/2, self.f+f_range/2),
-            (self.k-k_range/2, self.k+k_range/2))
-        )
-        # parameters = result.x
-        # self.draw_residual(parameters)
-        return [self.ra, self.dec, self.roll, self.f, self.k], result
-
-    def plate_optimize(self, ra_dec_range=8, roll_range=8, c_xy_range=200):
-        ra_dec_range = ra_dec_range/180*np.pi
-        roll_range = roll_range/180*np.pi
-
-        def star_rms(parameters):
-            """
-            parameters = [ra,dec,roll]
-            """
-            stars_ra, stars_dec, theta, pa = self.xy_to_eq(
-                self.matched_stars_xy['xcentroid'], self.matched_stars_xy['ycentroid'],
-                c_ra=parameters[0], c_dec=parameters[1], roll=parameters[2],
-                f=self.f, k=self.k,
-                c_x=parameters[3], c_y=parameters[4])
-            stars_skycoords = SkyCoord(
-                ra=stars_ra, dec=stars_dec, frame='icrs')
-            idx, d2d, d3d = self.matched_catalog_skycoords.match_to_catalog_sky(
-                stars_skycoords)
-            d2d = d2d.to(u.arcmin).value
-            return np.sqrt(np.mean(d2d**2))
-
-        result = minimize(fun=star_rms, x0=np.asarray([self.ra, self.dec, self.roll, self.c_x, self.c_y]), bounds=(
-            (self.ra-ra_dec_range/2, self.ra+ra_dec_range/2),
-            (self.dec-ra_dec_range/2, self.dec+ra_dec_range/2),
-            (self.roll-roll_range/2, self.roll+roll_range/2),
-            (self.c_x-c_xy_range/2, self.c_x+c_xy_range/2),
-            (self.c_y-c_xy_range/2, self.c_y+c_xy_range/2))
-        )
-
-        return [self.ra, self.dec, self.roll], result
-
+        init = np.asarray([self.plat_para['lon'], self.plat_para['lat'],
+                           self.plat_para['roll'], self.plat_para['cu'], self.plat_para['cv'],self.lens_para['f'],self.lens_para['k']])
+        ranges = np.asarray(
+            [angle_range, angle_range, angle_range, uv_range, uv_range, f_range,k_range])
+        bounds = np.vstack([init-ranges/2, init+ranges/2]).T
+        result = minimize(fun=rms1, x0=init, bounds=bounds)
+        x = result.x
+        self.plat_para['lon'] = x[0]
+        self.plat_para['lat'] = x[1]
+        self.plat_para['roll'] = x[2]
+        self.plat_para['cu'] = x[3]
+        self.plat_para['cv'] = x[4]
+        self.lens_para['f'] = x[5]
+        self.lens_para['k'] = x[6]
+        return result
 
 
     def distort_optimize(self):
-        catalog_theta = angular_separation(
-            self.ra*u.rad, self.dec*u.rad, self.matched_catalog_skycoords.ra, self.matched_catalog_skycoords.dec)
-        x = self.matched_stars_xy['xcentroid']
-        y = self.matched_stars_xy['ycentroid']
-        _, _, matched_stars_theta, _ = self.xy_to_eq(
-            self.matched_stars_xy['xcentroid'], self.matched_stars_xy['ycentroid'], c_ra=self.ra, c_dec=self.dec, roll=self.roll, f=self.f, k=self.k, c_x=self.c_x, c_y=self.c_y)
-        delta_x = x - self.c_x
-        delta_y = y - self.c_y
-        delta_xy = np.asarray([delta_x, delta_y])
-        delta_xy = np.dot([[1, 0], [0, -1]], delta_xy)
-        r = np.sqrt(delta_x**2+delta_y**2)*self.pixel_size
-        def func(r, a, b, c, d, e):
-            return a*r**5+b*r**4+c*r**3+d*r**2+e*r
-        [self.a, self.b, self.c, self.d, self.e], _ = curve_fit(
-            func, r, (matched_stars_theta-catalog_theta).to(u.rad))
+        im_u = self.stars_uv[0]
+        im_v = self.stars_uv[1]
+        star_x, star_y = self.uv2xy(im_u, im_v)
+        _, _, star_theta, _ = self.xy2wcs(star_x, star_y)
+        star_theta = star_theta.to(u.rad).value
+        if self.az_mode:
+            catalog_lon = self.catalog_skycoords.az
+            catalog_lat = self.catalog_skycoords.alt
+        else:
+            catalog_lon = self.catalog_skycoords.ra
+            catalog_lat = self.catalog_skycoords.dec
+        _, _, catalog_theta, _ = self.wcs2xy(catalog_lon, catalog_lat)
+        catalog_theta = catalog_theta.to(u.rad).value
 
-        return self.a, self.b, self.c, self.d, self.e
+        def func(theta, k1, k2,k3,k4):
+            return theta*(k1*theta+k2*theta**3+k3*theta**5+k4*theta**7)
+        [k1,k2,k3,k4], _ = curve_fit(
+            func, star_theta, (star_theta-catalog_theta))
+        self.lens_para['ks'] = [k1,k2,k3,k4]
+        return k1,k2,k3,k4
 
     def constellation(self, fn='test.jpg', cons_file_path='conslines.npy'):
         cons_lines = np.load(cons_file_path)
