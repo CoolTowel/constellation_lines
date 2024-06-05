@@ -45,7 +45,7 @@ def x_y(ra1, dec1, ra2, dec2, lens_func, pixel_size=0.006):
 
 
 class FishEyeImage():
-    def __init__(self, raw_path, img_path =None, loc=None, results_path='./results/', az_mode=True, anno_mode=False,
+    def __init__(self, raw_path, loc, img_path =None, results_path='./results/', az_mode=True, anno_mode=False,
                  raw_iso_corr=False,
                  f=14.6, k=-0.19, pixel_size=0.006, sensor='full_frame',
                  star_catalog='HIP2_rad.fits', mag_limit=6.5):
@@ -94,13 +94,17 @@ class FishEyeImage():
             (self.catalog['Hpmag'] < mag_limit) & (self.catalog['Hpmag'] > 1)]
         self.catalog_skycoords = SkyCoord(
             ra=self.catalog['RA'], dec=self.catalog['DEC'], frame='icrs', unit='rad')
+        self.az_frame = AltAz(obstime=self.obstime, location=self.loc, pressure=alt2pres(
+                self.loc.height.value), temperature=0*u.deg_C, relative_humidity=0.5, obswl=550*u.nm)
         if not az_mode:
             self.frame = ICRS
         elif az_mode:
-            self.frame = AltAz(obstime=self.obstime, location=self.loc, pressure=alt2pres(
-                self.loc.height.value), temperature=0*u.deg_C, relative_humidity=0.5, obswl=550*u.nm)
+            self.frame = self.az_frame
             self.catalog_skycoords = self.catalog_skycoords.transform_to(
                 self.frame)
+        above_horizen_mask = self.catalog_skycoords.transform_to(self.az_frame).alt>5*u.deg
+        self.catalog_skycoords = self.catalog_skycoords[above_horizen_mask]
+        
         self.lens_para = {'f': f, 'k': k, 'ks': np.zeros(4)}
         self.plat_para = {
             'lon': 0,
@@ -185,6 +189,12 @@ class FishEyeImage():
             detect_star_skycoords)
         sep_constraint = sep < sep_limit*u.arcmin
         self.catalog_skycoords = self.catalog_skycoords[sep_constraint]
+        if self.az_mode:
+            self.catalog_lon = self.catalog_skycoords.az
+            self.catalog_lat = self.catalog_skycoords.alt
+        else:
+            self.catalog_lon = self.catalog_skycoords.ra
+            self.catalog_lat = self.catalog_skycoords.dec
         matched_idx = idx[sep_constraint]
         self.star_skycoords = detect_star_skycoords[matched_idx]
         self.stars_uv = np.asarray(
@@ -276,15 +286,9 @@ class FishEyeImage():
         stars_skycoords = SkyCoord(lon, lat, frame=self.frame)
         _, ang_sep, _ = self.catalog_skycoords.match_to_catalog_sky(
             stars_skycoords)
-        if self.az_mode:
-            catalog_lon = self.catalog_skycoords.az
-            catalog_lat = self.catalog_skycoords.alt
-        else:
-            catalog_lon = self.catalog_skycoords.ra
-            catalog_lat = self.catalog_skycoords.dec
 
         catalog_x, catalog_y, catalog_theta, catalog_pa = self.wcs2xy(
-            catalog_lon, catalog_lat)
+            self.catalog_lon, self.catalog_lat)
         xy_sep = np.sqrt((star_x-catalog_x)**2+(star_y-catalog_y)**2)
 
         theta_rs = star_theta-catalog_theta
@@ -362,18 +366,13 @@ class FishEyeImage():
 
 
     def distort_optimize(self):
+        # only plat optimized, do the radial distortion correction
         im_u = self.stars_uv[0]
         im_v = self.stars_uv[1]
         star_x, star_y = self.uv2xy(im_u, im_v)
         _, _, star_theta, _ = self.xy2wcs(star_x, star_y)
         star_theta = star_theta.to(u.rad).value
-        if self.az_mode:
-            catalog_lon = self.catalog_skycoords.az
-            catalog_lat = self.catalog_skycoords.alt
-        else:
-            catalog_lon = self.catalog_skycoords.ra
-            catalog_lat = self.catalog_skycoords.dec
-        _, _, catalog_theta, _ = self.wcs2xy(catalog_lon, catalog_lat)
+        _, _, catalog_theta, _ = self.wcs2xy(self.catalog_lon, self.catalog_lat)
         catalog_theta = catalog_theta.to(u.rad).value
 
         def func(theta, k1, k2,k3,k4):
@@ -381,7 +380,29 @@ class FishEyeImage():
         [k1,k2,k3,k4], _ = curve_fit(
             func, star_theta, (star_theta-catalog_theta))
         self.lens_para['ks'] = [k1,k2,k3,k4]
+        # after radial distortion correction, remove outliers which are not stars in the image
+
+        im_u = self.stars_uv[0]
+        im_v = self.stars_uv[1]
+        star_x, star_y = self.uv2xy(im_u, im_v)
+        _, _, star_theta, _ = self.xy2wcs(star_x, star_y) # compute the newest star loc info
+        star_theta = star_theta.to(u.rad).value
+
+        # outliers = np.abs(star_theta-catalog_theta)>
+
+
+
+
         return k1,k2,k3,k4
+    
+    def spline_distortion_correction(self,resolution=20):
+        [sample_u,sample_v]=np.mgrid[0:self.height//resolution,0:self.width//resolution]*resolution+(resolution/2-0.5)
+        spamle_x,sample_y = self.uv2xy(sample_u.flatten(),sample_v.flatten())
+        sample_lon,sample_lat,_,_ = self.xy2wcs(sample_lon,sample_lat)
+        sample_skycoords = SkyCoord(sample_lon,sample_lat,frame=self.frame)
+
+
+
 
     def constellation(self, fn='test.jpg', cons_file_path='conslines.npy'):
         cons_lines = np.load(cons_file_path)

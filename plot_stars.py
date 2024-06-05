@@ -13,9 +13,7 @@ dunhuang  = EarthLocation(lon=94.322799*u.deg,lat=40.359581*u.deg,height = 1100)
 pic = FishEyeImage(raw_path=file+'.CR3',loc = zhangbei, mag_limit=5.5)
 
 solution = pic.solve(solve_size=800)
-
-print(pic.plat_para)
-print(pic.lens_para)
+pic.initial_xmatch()
 
 cata_lon = pic.catalog_skycoords.az
 cata_lat = pic.catalog_skycoords.alt
@@ -24,7 +22,12 @@ im_u,im_v = pic.xy2uv(x,y)
 
 plt.imshow(img)
 
-cata = CircularAperture(np.transpose([im_u,im_v]), r=5)
-cata.plot(color='red', lw=1.5)
+star_u = pic.stars_uv[0]
+star_v = pic.stars_uv[1]
+star = CircularAperture(np.transpose([star_u,star_v]), r=5)
+star.plot(color='red', lw=1.5)
+
+# cata = CircularAperture(np.transpose([im_u,im_v]), r=5)
+# cata.plot(color='red', lw=1.5)
 
 plt.show()
