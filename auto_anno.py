@@ -3,9 +3,9 @@ from astropy.table import Table
 
 # hips_star = Table.read('hip_for_cal.fits')
 
-file = 'DSC03748'
+file = '001_0333'
 
-pic = FishEyeImage(file+'.jpg', file+'.ARW',f=21.5,k=1)
+pic = FishEyeImage( raw_path=file+'.CR3', img_path=file+'.jpg', az_mode=False, anno_mode=True)
 
 pic.solve(solve_size=1000)
 

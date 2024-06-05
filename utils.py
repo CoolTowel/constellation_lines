@@ -45,17 +45,21 @@ def x_y(ra1, dec1, ra2, dec2, lens_func, pixel_size=0.006):
 
 
 class FishEyeImage():
-    def __init__(self, raw_path, loc, results_path='./results/', az_mode=True, raw_iso_corr=False,
+    def __init__(self, raw_path, img_path =None, loc=None, results_path='./results/', az_mode=True, anno_mode=False,
+                 raw_iso_corr=False,
                  f=14.6, k=-0.19, pixel_size=0.006, sensor='full_frame',
                  star_catalog='HIP2_rad.fits', mag_limit=6.5):
         self.results_path = results_path
         self.loc = loc
         self.az_mode = az_mode
         self.raw_path = raw_path
+        self.anno_mode = anno_mode
         with rawpy.imread(raw_path) as rawfile:
             raw = rawfile.postprocess(
                 gamma=(1, 1), no_auto_bright=True, output_bps=16)[16:4016, 20:6020]
 
+        if img_path is not None:
+            self.img = Image.open(img_path)
         with exiftool.ExifToolHelper() as et:
             exif = et.get_metadata(raw_path)[0]
             time = exif['EXIF:DateTimeOriginal']
@@ -125,9 +129,10 @@ class FishEyeImage():
             dec = float(t3_solution['Dec']/180*np.pi)
             eq_roll = float(t3_solution['Roll']/180*np.pi)
             self.solution = {'ra': ra, 'dec': dec, 'eq_roll': eq_roll}
-            f = open(self.results_path+self.raw_path+'.solution', "w")
-            f.write(json.dumps(self.solution))
-            f.close()
+            if not self.anno_mode:
+                f = open(self.results_path+self.raw_path+'.solution', "w")
+                f.write(json.dumps(self.solution))
+                f.close()
 
         print(self.solution)
         if not self.az_mode:
@@ -380,29 +385,26 @@ class FishEyeImage():
 
     def constellation(self, fn='test.jpg', cons_file_path='conslines.npy'):
         cons_lines = np.load(cons_file_path)
-        cons_lines_xy = np.array([[0, 0], [0, 0]])
         draw = ImageDraw.Draw(self.img)
 
         for i in range(cons_lines.shape[0]):
             star_1 = cons_lines[i][0]
             star_2 = cons_lines[i][1]
-            x1, y1, angular_separation1 = x_y(
-                self.ra, self.dec, star_1[0]/180*np.pi, star_1[1]/180*np.pi, self.lens_func, self.pixel_size)
-            x2, y2, angular_separation2 = x_y(
-                self.ra, self.dec, star_2[0]/180*np.pi, star_2[1]/180*np.pi, self.lens_func, self.pixel_size)
-            if angular_separation1 < 0.45*np.pi or angular_separation2 < 0.45*np.pi:
-                if x2 < x1:
-                    x1, x2 = x2, x1
-                    y1, y2 = y2, y1
-                k = (y2-y1)/(x2-x1)
+            x1,y1,angular_separation1,_ = self.wcs2xy(star_1[0]*u.deg,star_1[1]*u.deg)
+            x2,y2,angular_separation2,_ = self.wcs2xy(star_2[0]*u.deg,star_2[1]*u.deg)
+            u1,v1 = self.xy2uv(x1,y1)
+            u2,v2 = self.xy2uv(x2,y2)
+
+            if angular_separation1 < 0.45*np.pi*u.rad or angular_separation2 < 0.45*np.pi*u.rad:
+                if u2 < u1:
+                    u1, u2 = u2, u1
+                    v1, v2 = v2, v1
+                k = (v2-v1)/(u2-u1)
                 break_for_star = 20  # 星座连线断开，露出恒星
-                x1 += break_for_star*np.cos(np.arctan(k))
-                y1 += break_for_star*np.sin(np.arctan(k))
-                x2 -= break_for_star*np.cos(np.arctan(k))
-                y2 -= break_for_star*np.sin(np.arctan(k))
-                x1, y1 = self.rot_shift([x1, y1], self.raw)
-                x2, y2 = self.rot_shift([x2, y2], self.raw)
-                # cons_lines_xy = np.append(cons_lines_xy,[line_vertex1,line_vertex2])
-                # cons_lines[i][1] = self.lens_proj([x2, y2], self.raw)
-                draw.line([x1, y1, x2, y2], fill='white', width=7)
+                u1 += break_for_star*np.cos(np.arctan(k))
+                v1 += break_for_star*np.sin(np.arctan(k))
+                u2 -= break_for_star*np.cos(np.arctan(k))
+                v2 -= break_for_star*np.sin(np.arctan(k))
+
+                draw.line([u1, v1, u2, v2], fill='white', width=7)
         self.img.save(fn)
