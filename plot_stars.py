@@ -27,7 +27,7 @@ star_v = pic.stars_uv[1]
 star = CircularAperture(np.transpose([star_u,star_v]), r=5)
 star.plot(color='red', lw=1.5)
 
-# cata = CircularAperture(np.transpose([im_u,im_v]), r=5)
-# cata.plot(color='red', lw=1.5)
+cata = CircularAperture(np.transpose([im_u,im_v]), r=5)
+cata.plot(color='blue', lw=1.5)
 
 plt.show()
