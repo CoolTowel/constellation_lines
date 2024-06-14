@@ -156,7 +156,7 @@ class FishEyeImage():
             self.plat_para['roll'] = self.solution['eq_roll']+c.to('rad').value
             # 地平坐标经度自东向西增加，与天球坐标相反，故az坐标下计得所有pa需加负号处理。因此负负得正，此处为相加
 
-    def initial_xmatch(self, sub_region_size=500, sigma=15, sep_limit=35):
+    def xmatch(self, sub_region_size=500, sigma=15, sep_limit=35):
         try:
             print('Using existing star detection data')
             self.detected_stars = Table.read(self.results_path+self.raw_path+'.detected_stars'+'_'+str(
@@ -169,7 +169,7 @@ class FishEyeImage():
                         i+1)*sub_region_size, j*sub_region_size:(j+1)*sub_region_size]
                     mean, median, std = sigma_clipped_stats(data, sigma=3.0)
                     threshold = median + (sigma * std)
-                    stars_founder = DAOStarFinder(fwhm=5, threshold=threshold)
+                    stars_founder = DAOStarFinder(fwhm=5, threshold=threshold, min_separation=5)
                     stars_found = stars_founder(data)
                     if stars_found is not None:
                         stars_found['xcentroid'] += j*sub_region_size
@@ -349,7 +349,7 @@ class FishEyeImage():
         plt.tight_layout()
         plt.show()
 
-    def optimize(self, coord_range=5,  roll_range = 2, f_range=1, k_range=0.2, uv_range=40, minmize_func = minimize):
+    def optimize(self, coord_range=10,  roll_range = 3, f_range=1, k_range=0.2, uv_range=80, minmize_func = minimize):
         coord_range = coord_range/180*np.pi
         roll_range = roll_range/180*np.pi
         def rms1(x):
